@@ -16,6 +16,14 @@ FALLBACK_REPLY = (
 # way to guarantee they hear something.
 MAX_REPLY_CHARS = 1500
 
+# Sent once when a contact goes over the per-minute message limit. Further
+# messages in the same window get no reply at all, so a loop on the other end
+# cannot be answered message for message.
+RATE_LIMITED_REPLY = (
+    "You're sending messages faster than I can answer. Please wait a minute and "
+    "try again, or find what you need at https://curesyngap1.org/"
+)
+
 # Sent in place of a reply too long to deliver. Worded for either cause: an
 # off-topic request the model complied with, or an on-topic answer that ran long.
 TOO_LONG_REPLY = (

@@ -367,6 +367,7 @@ Symptoms seen while getting this working end to end, and what each one means.
 | The user gets "You said ..." alongside the real answer | The WhatsApp Sandbox Inbound URL is still the stock Twilio Function every new sandbox ships with. Point it at `<host>/whatsapp-sandbox-silence`. |
 | Two replies to one message | A local container and the deployed service are both serving the same Conversation Configuration. Only one webhook host can be current. |
 | A corrected credential changes nothing | Render keeps the running instance until something deploys. Run `docker compose run --rm deploy`. |
+| One tester gets no replies while others are answered | They went over the rate limit: `RATE_LIMIT_MESSAGES` per minute per contact. The log says `Rate limit: ...`. It clears itself a minute after their last message. |
 | A message gets no reply at all, but the logs show `Sent WHATSAPP response` | The body was over Twilio's 1600-character limit, which Twilio rejects after accepting the send; the Console's Messaging logs show the failure. `Agent.respond()` now replaces any reply over `MAX_REPLY_CHARS` with a short one and logs a warning, so look for that line first. |
 | `GET /` returns 404 | Expected. The app registers `/webhook`, `/twiml`, `/ws`, `/healthz` and the sandbox silencer, and no root route. Use `/healthz`. |
 | The first message is slow or returns the fallback | The free instance spun down. See [The free plan sleeps](#the-free-plan-sleeps). |
@@ -395,6 +396,21 @@ lets the escalation tool carry conversation details the model is never asked for
 **Knowledge** comes from whatever satisfies the `KnowledgeSource` protocol in
 `src/app/tools/knowledge.py`, either Enterprise Knowledge or the offline
 fixture. See [Knowledge](#knowledge).
+
+## Limits the agent holds itself to
+
+Constants in `src/app/main.py` and `src/app/prompt.py`, not environment
+variables: each one exists to stop a specific failure, and none of them is a
+setting a deployment should want to differ on.
+
+| Limit | Why |
+| --- | --- |
+| `MAX_REPLY_CHARS` (1500) | Twilio rejects a body over 1600 characters *after* accepting the send, so an oversized reply reaches nobody and reports nothing. Over this, the family gets a short reply instead. |
+| `MAX_INBOUND_CHARS` (2000) | Whatever is sent is what the model reads. Longer costs tokens and is where an injection attempt would hide. |
+| `RATE_LIMIT_MESSAGES` (12/minute, per contact) | One sender cannot spend an OpenAI call per message. The contact is told once, then not answered until the window rolls. In-process, so it is per replica. |
+| `MAX_CONVERSATIONS` (500) | Nothing tells this module a conversation closed, so the oldest are dropped rather than kept for the life of the process. |
+| `MAX_HISTORY_MESSAGES` (40) | The turns of one conversation sent back to the model. |
+| `LOGGED_CHARS` (200) | How much of a family's question reaches a log line. A question can itself be a health detail; an escalation's transport still gets the whole text. |
 
 ## Knowledge
 

@@ -7,7 +7,12 @@ from fakes import FakeMessage, FakeOpenAI, tool_call
 from app.agent import Agent
 from app.config import AgentSettings
 from app.prompt import FALLBACK_REPLY, MAX_REPLY_CHARS, TOO_LONG_REPLY
-from app.tools.escalation import EscalationContext, LoggingEscalation
+from app.tools.escalation import (
+    LOGGED_CHARS,
+    EscalationContext,
+    EscalationRequest,
+    LoggingEscalation,
+)
 from app.tools.knowledge import FixtureKnowledgeSource
 
 SETTINGS = AgentSettings(
@@ -142,6 +147,25 @@ async def test_escalation_carries_the_conversation_details():
     assert "Denver" in request.render()
     # The rendered escalation masks the contact's number.
     assert "+15555550100" not in request.render()
+
+
+def test_a_logged_escalation_clips_what_the_family_wrote():
+    """A question can itself be a health detail, and a log line travels further
+    than the developer reading it. The request keeps the whole text."""
+    request = EscalationRequest(
+        question="My daughter " + "has many seizures " * 40,
+        reason="not in kb",
+        conversation_id="conv_1",
+        channel="WHATSAPP",
+        transcript=[{"role": "user", "content": "x" * 500}],
+    )
+
+    clipped = request.render(truncate_to=LOGGED_CHARS)
+
+    assert "more characters]" in clipped
+    assert len(clipped) < len(request.render())
+    for line in clipped.splitlines():
+        assert len(line) < LOGGED_CHARS + 60
 
 
 async def test_tool_iterations_are_capped_then_answered_without_tools():
