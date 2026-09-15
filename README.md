@@ -10,13 +10,17 @@ Families and supporters message a number and ask plain-language questions:
 
 The agent answers briefly and links to the most relevant page on curesyngap1.org. It does not give medical advice. When it cannot answer from the knowledge base, it escalates the question to the team rather than guessing.
 
+It runs at <https://curesyngap1-agent.onrender.com> and serves WhatsApp through Twilio's sandbox. [Text the agent](#text-the-agent) is how to try it; [Quickstart](#quickstart) is how to run it locally.
+
 > **Decision needed before real families use this: what memory may retain.**
 > Conversation Memory is enabled, and it writes observations and conversation
 > summaries from whatever a family says. Extraction is not selective, so a
 > family describing seizures or medications would have that retained and read
 > back on their next message. This is on deliberately, to make the behavior
-> visible while the project is still being tested by the team, and it is not a
-> settled policy. See [Memory](#memory) and
+> visible rather than to settle the question. It applies to anyone holding the
+> sandbox join code, on a public host, so widen who can text it only once the
+> question is answered. See [Memory](#memory),
+> [Who can text it](#who-can-text-it), and
 > [Open decision 3](docs/decisions.md).
 
 ## How a message flows
@@ -29,6 +33,46 @@ WhatsApp or SMS
   -> OpenAI model, with two tools: search the knowledge base, escalate
   -> reply routed back to whichever channel the message arrived on
 ```
+
+## Text the agent
+
+No setup, no account, no clone. The agent runs at
+<https://curesyngap1-agent.onrender.com> and answers over WhatsApp through
+Twilio's sandbox.
+
+1. Ask a maintainer for the sandbox join code. It routes your messages to this
+   Twilio account, so it is shared deliberately rather than published here; see
+   [Who can text it](#who-can-text-it).
+2. From WhatsApp, send `join <code>` to **+1 415 523 8886**. It replies to
+   confirm. Any number of people can join the same sandbox with the same code,
+   and each session expires three days after joining, so a returning tester
+   sends `join <code>` again.
+3. Ask it something the site covers: "What is the SYNGAP1 ICD-10 code?", "How do
+   I start a fundraiser?", "What should I do if I need medical information?"
+
+What to expect:
+
+- A short answer with a link to the page on curesyngap1.org it came from.
+- The first message after a quiet spell can take ten seconds or return the
+  fallback reply, because the service sleeps when idle. Send a second one.
+- No medical advice, ever. A clinical question is answered with a pointer to a
+  qualified clinician; see [Safety](#safety).
+- It remembers earlier conversations with you. Asking "what did we talk about
+  before?" is the fastest way to see that, and
+  [Retention is not settled](#retention-is-not-settled) is the reason to think
+  before testing it with real health details.
+
+### Who can text it
+
+The join code belongs to this Twilio account's sandbox, and the sandbox number
+is shared across every Twilio account: the code is what routes a message to this
+agent rather than someone else's. Anyone who has it can reach the agent, and what
+they say is retained (see [Memory](#memory)), which is why it is not in this
+file.
+
+Anyone with access to the Twilio account reads it off the **Try WhatsApp** page
+of the Console and needs nothing from anyone. Everybody else needs a maintainer
+to pass it on.
 
 ## Quickstart
 
@@ -203,6 +247,14 @@ and the WhatsApp Sandbox Inbound URL, set to
 <https://www.twilio.com/console/sms/whatsapp/sandbox>. That field has no API, so
 it is a manual step every time the hostname changes.
 
+**Changing an environment variable does not deploy.** Render stores the new
+value and the running instance keeps the old one until something deploys, so a
+corrected credential appears to have no effect. Trigger one:
+
+```bash
+docker compose run --rm deploy
+```
+
 **Deploying and checking on it.** A push to the branch in `render.yaml` deploys
 on its own. For the cases a push does not cover — redeploying after an
 environment variable changes, or recovering a failed deploy — and to read the
@@ -245,6 +297,71 @@ removes it. That re-deploys onto the new instance type and costs nothing else,
 since this service keeps no state of its own: conversation history is
 in-process and rebuilt from the next message, and what persists lives in
 Twilio's Memory Store.
+
+## Moving off the sandbox
+
+The sandbox is a shared Twilio number with a join code, which makes it a testing
+tool rather than something to give families. Two things replace it, independently.
+
+### A WhatsApp sender of your own
+
+1. Get a Meta Business Portfolio verified and a WhatsApp sender approved for a
+   Twilio number. Twilio's sender self-signup drives this, and it takes weeks
+   rather than minutes, which is the reason the sandbox exists.
+2. Set `TWILIO_WHATSAPP_NUMBER=whatsapp:+1<your number>` in `.env` and in the
+   Render service's environment.
+3. Re-run provisioning so the capture rules name the new sender:
+
+   ```bash
+   docker compose run --rm provision --webhook-domain curesyngap1-agent.onrender.com
+   ```
+
+   It patches the Conversation Configuration in place, so it keeps its id.
+4. Deploy, because an environment variable alone does not:
+   `docker compose run --rm deploy`.
+
+An approved sender needs no Inbound URL and no `/whatsapp-sandbox-silence`: that
+route exists only because the sandbox has its own echoing webhook. Leaving the
+route registered is harmless.
+
+### An SMS number
+
+1. Buy an SMS-capable Twilio number. Messaging US numbers requires toll-free
+   verification or 10DLC registration first, which takes one to three weeks.
+2. Set `TWILIO_PHONE_NUMBER` to it in E.164 in `.env` and on the Render service.
+   `build_server()` registers the SMS channel whenever that value starts with
+   `+`, so nothing else has to change for the agent to serve it.
+3. Re-run provisioning and deploy, as above.
+
+Inbound SMS is captured by the Conversation Configuration's capture rules, so the
+number's own Messaging webhook stays empty. This path is unverified end to end:
+every live test so far has gone over WhatsApp, and the SMS channel is exercised
+only by the test suite. Expect to debug it with `deploy.py --logs` the first
+time.
+
+A family who texts after using WhatsApp starts over, because Conversation Memory
+keys a profile on the identifier type: `whatsapp:+1...` and `+1...` are two
+identifiers for one person. Running both channels is fine; merging their history
+is not something this app can do.
+
+## Troubleshooting
+
+Symptoms seen while getting this working end to end, and what each one means.
+
+| Symptom | Cause |
+| --- | --- |
+| `POST /webhook` returns 403 within a few ms | The auth token the service holds is not the one Twilio signs with. Compare lengths before contents: trailing whitespace in a `.env` value survives `docker --env-file` and makes a 32-character token 33. |
+| Messages arrive, no reply, no application log | Same 403. Twilio's delivery is fine and the request never reaches the callback. |
+| The user gets "You said ..." alongside the real answer | The WhatsApp Sandbox Inbound URL is still the stock Twilio Function every new sandbox ships with. Point it at `<host>/whatsapp-sandbox-silence`. |
+| Two replies to one message | A local container and the deployed service are both serving the same Conversation Configuration. Only one webhook host can be current. |
+| A corrected credential changes nothing | Render keeps the running instance until something deploys. Run `docker compose run --rm deploy`. |
+| `GET /` returns 404 | Expected. The app registers `/webhook`, `/twiml`, `/ws`, `/healthz` and the sandbox silencer, and no root route. Use `/healthz`. |
+| The first message is slow or returns the fallback | The free instance spun down. See [The free plan sleeps](#the-free-plan-sleeps). |
+| The agent says it has no memory of earlier conversations | Look for a `Recall:` line in the logs. `observations=0` means retrieval found nothing; no line at all means recall was skipped or the contact has no profile yet. |
+| A deploy ends `update_failed` right after creation | The service started before its credentials existed. `build_server()` refuses to start without them, by design. Set them, then deploy. |
+
+`docker compose run --rm deploy --logs 50` is the first move for all of these on
+a deployed service, and `docker compose logs agent` locally.
 
 ## Making changes
 
