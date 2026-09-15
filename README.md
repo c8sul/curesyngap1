@@ -264,9 +264,21 @@ service URL back:
 docker compose run --rm deploy --status    # report, change nothing
 docker compose run --rm deploy             # deploy and wait for it to go live
 docker compose run --rm deploy --logs 50   # the service's recent output
+docker compose run --rm deploy --sync-env  # push changed .env values, then deploy
 ```
 
+`--sync-env` is how a credential is rotated: put the new value in `.env`, run it,
+and it pushes what differs from the service's current values and deploys, since
+Render keeps the running instance on the old value until something does. It
+prints key names and lengths, never values.
+
 These need `RENDER_API_KEY` in `.env`, and `--logs` also needs `RENDER_OWNER_ID`.
+
+Keep trailing whitespace out of `.env` values. `python-dotenv` strips it, so a
+local run is unaffected, but `docker --env-file` passes the value through
+verbatim. A credential that picks up a stray space that way is wrong only where
+it was copied to, and an auth token one character too long fails every webhook
+signature with a 403 that looks nothing like a bad secret.
 A deployed agent's logs are the only place a failing recall or a cold-start
 timeout is visible, so `--logs` is the deployed equivalent of
 `docker compose logs agent`. Build logs are in the dashboard.

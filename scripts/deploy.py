@@ -3,12 +3,19 @@
     docker compose run --rm deploy            # deploy and wait
     docker compose run --rm deploy --status    # report, change nothing
     docker compose run --rm deploy --logs 50   # the service's recent output
+    docker compose run --rm deploy --sync-env  # push changed .env values, then deploy
 
 Render deploys on push once the repository is connected, so this exists for the
 cases that push does not cover: redeploying after an environment variable
 changes, and recovering a service whose last deploy failed. It also reports the
 service URL, which is what `provision.py --webhook-domain` and the WhatsApp
 Sandbox Inbound URL both have to name.
+
+`--sync-env` pushes the values `render.yaml` marks `sync: false` from the local
+environment to the service, for rotating a credential without going through the
+dashboard. It sends only what differs, prints key names and lengths rather than
+values, and deploys afterwards, because Render keeps the running instance on the
+old value until something does.
 
 The service itself is defined by `render.yaml` and created through Render's
 Blueprints, not here. This script finds it by name and never creates one, so it
@@ -67,20 +74,90 @@ async def find_service(client: httpx.AsyncClient, name: str, owner_id: str | Non
     return exact[0]
 
 
+# Render's health check hits /healthz every five seconds, which is a dozen lines
+# a minute that say only that the service is up.
+HEALTH_CHECK_LINE = '"GET /healthz'
+
+
 async def recent_logs(
     client: httpx.AsyncClient, service_id: str, owner_id: str, limit: int
 ) -> list[dict]:
-    """The service's most recent log lines, newest last.
+    """The service's most recent log lines, oldest first.
 
     The only window onto a running deploy that this script has: an agent that
     answers without memory, or not at all, shows up here and nowhere else.
+
+    Health checks are dropped, and enough extra lines are fetched to cover what
+    that removes, so `--logs 50` spans the last fifty things that happened
+    rather than the last four minutes.
     """
     response = await client.get(
         f"{RENDER_API}/logs",
-        params={"ownerId": owner_id, "resource": service_id, "limit": limit},
+        params={
+            "ownerId": owner_id,
+            "resource": service_id,
+            # Without this, a recent deploy's build output crowds out everything
+            # the agent said.
+            "type": "app",
+            "limit": min(limit * 10, 1000),
+        },
     )
     response.raise_for_status()
-    return list(reversed(response.json().get("logs", [])))
+    lines = [
+        line
+        for line in response.json().get("logs", [])
+        if HEALTH_CHECK_LINE not in str(line.get("message", ""))
+    ]
+    # Render returns them oldest first, so the newest are at the end.
+    return lines[-limit:]
+
+
+def sync_false_keys(spec_path: str = "render.yaml") -> list[str]:
+    """The env var names `render.yaml` expects to be supplied per environment."""
+    import yaml  # Imported here so the rest of the script runs without it.
+
+    spec = yaml.safe_load(open(spec_path))["services"][0]
+    return [entry["key"] for entry in spec["envVars"] if "value" not in entry]
+
+
+async def sync_env(client: httpx.AsyncClient, service_id: str, keys: list[str]) -> int:
+    """Push local values for `keys` to the service. Returns how many changed.
+
+    Values are compared before writing so an unchanged credential is not
+    rewritten, and only names and lengths are printed: a length mismatch is
+    usually the whole story, because trailing whitespace survives
+    `docker --env-file` and a token one character too long fails every webhook
+    signature.
+    """
+    response = await client.get(
+        f"{RENDER_API}/services/{service_id}/env-vars", params={"limit": 100}
+    )
+    response.raise_for_status()
+    remote = {
+        (entry.get("envVar", entry))["key"]: (entry.get("envVar", entry)).get("value") or ""
+        for entry in response.json()
+    }
+
+    changed = 0
+    for key in keys:
+        local = os.environ.get(key, "")
+        if not local:
+            print(f"  {key}: absent locally, left alone")
+            continue
+        if local == remote.get(key, ""):
+            continue
+        written = await client.put(
+            f"{RENDER_API}/services/{service_id}/env-vars/{key}",
+            json={"value": local},
+        )
+        written.raise_for_status()
+        was = len(remote.get(key, ""))
+        print(f"  {key}: updated (was {was} chars, now {len(local)})")
+        changed += 1
+
+    if not changed:
+        print("  every value already matches")
+    return changed
 
 
 async def latest_deploy(client: httpx.AsyncClient, service_id: str) -> dict | None:
@@ -157,6 +234,11 @@ async def main() -> int:
         help="Report the service and its last deploy without starting one.",
     )
     parser.add_argument(
+        "--sync-env",
+        action="store_true",
+        help="Push changed `sync: false` values from the environment, then deploy.",
+    )
+    parser.add_argument(
         "--logs",
         type=int,
         metavar="N",
@@ -199,6 +281,12 @@ async def main() -> int:
                 print(f"  last deploy {deploy.get('id')}: {deploy.get('status')}")
                 print(f"  finished: {deploy.get('finishedAt') or 'still running'}")
             return 0
+
+        if args.sync_env:
+            print("Syncing environment:")
+            if not await sync_env(client, service_id, sync_false_keys()):
+                print("Nothing to deploy.")
+                return 0
 
         deploy = await trigger_deploy(client, service_id)
         deploy_id = str(deploy["id"])

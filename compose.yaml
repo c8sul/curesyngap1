@@ -33,10 +33,14 @@ services:
   # Trigger or inspect a Render deploy:
   #   docker compose run --rm deploy --status
   deploy:
-    build: .
+    build:
+      context: .
+      args:
+        EXTRAS: deploy
     env_file: .env
     volumes:
       - ./scripts:/app/scripts
+      - ./render.yaml:/app/render.yaml:ro
     entrypoint: ["python", "scripts/deploy.py"]
 
   # One-time Twilio resource creation:
