@@ -209,12 +209,15 @@ environment variable changes, or recovering a failed deploy — and to read the
 service URL back:
 
 ```bash
-docker compose run --rm deploy --status   # report, change nothing
-docker compose run --rm deploy            # deploy and wait for it to go live
+docker compose run --rm deploy --status    # report, change nothing
+docker compose run --rm deploy             # deploy and wait for it to go live
+docker compose run --rm deploy --logs 50   # the service's recent output
 ```
 
-Both need `RENDER_API_KEY` in `.env`. Build and runtime logs live in the Render
-dashboard; the API does not serve them.
+These need `RENDER_API_KEY` in `.env`, and `--logs` also needs `RENDER_OWNER_ID`.
+A deployed agent's logs are the only place a failing recall or a cold-start
+timeout is visible, so `--logs` is the deployed equivalent of
+`docker compose logs agent`. Build logs are in the dashboard.
 
 **The serving command is not the Dockerfile's.** `render.yaml` sets
 `dockerCommand` to `uvicorn --factory app.main:create_app`, because the
