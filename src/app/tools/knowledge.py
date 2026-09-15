@@ -2,30 +2,59 @@
 
 `FixtureKnowledgeSource` serves a small hand-written set of curesyngap1.org
 pages so the agent loop is testable before Enterprise Knowledge is populated.
+It is the stub, and it is what runs unless `TWILIO_KNOWLEDGE_BASE_ID` is set.
 `TwilioKnowledgeSource` calls Enterprise Knowledge and attaches a source URL to
 each chunk.
 
 The URL matters: every answer must link the family to the page they need next.
-Enterprise Knowledge search returns `content`, `knowledge_id`, `created_at` and
-`score` per chunk, with no URL, so the URL is resolved from `knowledge_id`
-through `KNOWLEDGE_ID_URLS`.
+Enterprise Knowledge returns `documentUrl` per chunk, but it is null for content
+uploaded as files rather than crawled, which is how this knowledge base is
+populated. `_resolve_url` therefore tries, in order: the chunk's own
+`documentUrl`, a curesyngap1.org URL written inside the passage text, and the
+document's landing page from `DOCUMENT_URLS`.
 """
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+import httpx
 from tac.tools.base import TACTool, function_tool
 
 FIXTURE_PATH = Path(__file__).resolve().parent.parent / "data" / "kb_fixture.json"
 
-# knowledge_id -> page URL, for chunks returned by Enterprise Knowledge.
-# Populate once the crawl of curesyngap1.org succeeds and the knowledge source
-# IDs are known.
-KNOWLEDGE_ID_URLS: dict[str, str] = {}
+KNOWLEDGE_API = "https://knowledge.twilio.com"
+
+# Semantic search always returns its closest matches, so an off-topic question
+# comes back with passages rather than with nothing. Dropping the weak tail
+# keeps unrelated content out of the model's context. It cannot decide
+# relevance on its own: a question about the weather in Denver matches the
+# Colorado clinic page strongly, which is why the prompt makes the model judge
+# whether the passages answer the question and escalate when they do not.
+DEFAULT_MIN_SCORE = 0.3
+
+# Document title -> the page a reader should land on, for chunks whose own text
+# carries no URL. Keyed on `documentTitle` rather than `knowledgeId`, because a
+# re-upload of the same content changes the id and not the title. Each bundle
+# covers several pages; these are the one to send someone to first.
+DOCUMENT_URLS: dict[str, str] = {
+    "01-about-syngap1": "https://curesyngap1.org/what-is-syngap1/",
+    "02-treatment": "https://curesyngap1.org/syngap1-treatment/",
+    "03-family-resources": (
+        "https://curesyngap1.org/syngap1-resources-for-newly-diagnosed-families/"
+    ),
+    "04-clinical-care": "https://curesyngap1.org/doctors/",
+    "05-research-grants": "https://curesyngap1.org/resources/grants/",
+    "06-about-the-organization": "https://curesyngap1.org/mission-and-values/",
+}
 
 SITE_ROOT = "https://curesyngap1.org/"
+
+# A curesyngap1.org URL inside a passage. The uploaded documents list the page
+# each section came from, so a chunk often carries its own exact link.
+_URL_IN_TEXT = re.compile(r"https://curesyngap1\.org/[\w./-]*[\w/]")
 
 
 @dataclass(frozen=True)
@@ -47,9 +76,15 @@ class KnowledgeSource(Protocol):
 class FixtureKnowledgeSource:
     """Keyword search over a checked-in set of page summaries.
 
-    Scores a chunk by how many query terms appear in its text, so it behaves
-    enough like a retrieval step to exercise the agent loop and the
-    always-include-the-link rule.
+    A stand-in for Enterprise Knowledge, selected whenever
+    `TWILIO_KNOWLEDGE_BASE_ID` is unset. The passages are hand-written, not
+    crawled from curesyngap1.org, and some of their URLs are unverified, so
+    answers drawn from them demonstrate the loop rather than inform anyone.
+
+    Scoring counts how many query terms appear in a chunk's title and content,
+    which is enough to exercise the agent loop and the always-include-the-link
+    rule. It is not retrieval: it cannot match a paraphrase, has no notion of
+    similarity, and ranks by term count rather than relevance.
     """
 
     def __init__(self, chunks: list[KBChunk] | None = None) -> None:
@@ -73,26 +108,64 @@ class FixtureKnowledgeSource:
 
 
 class TwilioKnowledgeSource:
-    """Enterprise Knowledge search, with source URLs attached."""
+    """Enterprise Knowledge search, with a source URL attached to each chunk.
 
-    def __init__(self, knowledge_client: object, knowledge_base_id: str) -> None:
-        self._client = knowledge_client
+    Calls the Search API directly rather than through `tac`'s
+    `search_knowledge_base()`, because that helper parses responses into
+    `KnowledgeChunkResult`, which drops `documentTitle` and `documentUrl`.
+    Both are needed to link an answer to a page.
+    """
+
+    SEARCH_TIMEOUT_SECONDS = 8.0
+
+    def __init__(
+        self,
+        knowledge_base_id: str,
+        api_key: str,
+        api_secret: str,
+        min_score: float = DEFAULT_MIN_SCORE,
+        base_url: str = KNOWLEDGE_API,
+    ) -> None:
         self._knowledge_base_id = knowledge_base_id
+        self._auth = (api_key, api_secret)
+        self._min_score = min_score
+        self._base_url = base_url
 
     async def search(self, query: str, top_k: int) -> list[KBChunk]:
-        results = await self._client.search_knowledge_base(  # type: ignore[attr-defined]
-            knowledge_base_id=self._knowledge_base_id,
-            query=query,
-            top_k=top_k,
-        )
-        return [
-            KBChunk(
-                content=result.content,
-                url=KNOWLEDGE_ID_URLS.get(result.knowledge_id, SITE_ROOT),
-                score=result.score,
+        async with httpx.AsyncClient(timeout=self.SEARCH_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                f"{self._base_url}/v2/KnowledgeBases/{self._knowledge_base_id}/Search",
+                json={"query": query[:2048], "top": top_k},
+                auth=self._auth,
             )
-            for result in results
-        ]
+        response.raise_for_status()
+        chunks = [_to_chunk(chunk) for chunk in response.json().get("chunks", [])]
+        return [chunk for chunk in chunks if chunk.score is None or chunk.score >= self._min_score]
+
+
+def _to_chunk(chunk: dict[str, object]) -> KBChunk:
+    content = str(chunk.get("content") or "")
+    title = chunk.get("documentTitle")
+    return KBChunk(
+        content=content,
+        url=_resolve_url(content, chunk.get("documentUrl"), title),
+        title=str(title) if title else None,
+        score=chunk.get("score"),  # type: ignore[arg-type]
+    )
+
+
+def _resolve_url(content: str, document_url: object, title: object) -> str:
+    """The most specific page this passage can be attributed to.
+
+    Falling back to the site root is a poor answer, so it is last: a family
+    given the front page has to search the site themselves.
+    """
+    if document_url:
+        return str(document_url)
+    found = _URL_IN_TEXT.search(content)
+    if found:
+        return found.group(0)
+    return DOCUMENT_URLS.get(str(title), SITE_ROOT)
 
 
 def load_fixture_chunks(path: Path = FIXTURE_PATH) -> list[KBChunk]:

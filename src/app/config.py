@@ -23,6 +23,7 @@ class AgentSettings:
     timeout_seconds: float
     max_tool_iterations: int
     top_k: int
+    min_knowledge_score: float
     reasoning_effort: str | None
 
     @classmethod
@@ -36,6 +37,7 @@ class AgentSettings:
             timeout_seconds=float(os.environ.get("AGENT_TIMEOUT_SECONDS", "12")),
             max_tool_iterations=int(os.environ.get("AGENT_MAX_TOOL_ITERATIONS", "3")),
             top_k=int(os.environ.get("KB_TOP_K", "5")),
+            min_knowledge_score=float(os.environ.get("KB_MIN_SCORE", "0.3")),
         )
 
 

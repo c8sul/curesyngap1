@@ -84,14 +84,19 @@ def build_server() -> TACFastAPIServer:
         )
 
     knowledge_base_id = os.environ.get("TWILIO_KNOWLEDGE_BASE_ID")
-    if knowledge_base_id and tac.knowledge_client:
-        knowledge_source = TwilioKnowledgeSource(tac.knowledge_client, knowledge_base_id)
+    if knowledge_base_id:
+        knowledge_source = TwilioKnowledgeSource(
+            knowledge_base_id=knowledge_base_id,
+            api_key=os.environ["TWILIO_API_KEY"],
+            api_secret=os.environ["TWILIO_API_SECRET"],
+            min_score=settings.min_knowledge_score,
+        )
         logger.info(f"Knowledge: Enterprise Knowledge base {knowledge_base_id}")
     else:
         knowledge_source = FixtureKnowledgeSource()
         logger.warning(
-            "Knowledge: checked-in fixture. Set TWILIO_KNOWLEDGE_BASE_ID to use "
-            "Enterprise Knowledge."
+            "Knowledge: checked-in fixture, not curesyngap1.org content. Set "
+            "TWILIO_KNOWLEDGE_BASE_ID to search Enterprise Knowledge."
         )
 
     openai_client = AsyncOpenAI()
