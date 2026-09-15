@@ -39,6 +39,17 @@ services:
       - ./scripts:/app/scripts
     entrypoint: ["python", "scripts/provision.py"]
 
+  # `docker compose run --rm memory-e2e --address whatsapp:+1...`
+  # Checks the Conversation Memory round trip against the live account.
+  memory-e2e:
+    build:
+      context: .
+    env_file: .env
+    volumes:
+      - ./src:/app/src
+      - ./scripts:/app/scripts
+    entrypoint: ["python", "scripts/memory_e2e.py"]
+
   # `docker compose run --rm test`
   test:
     build:
@@ -49,5 +60,6 @@ services:
       - ./pyproject.toml:/app/pyproject.toml
       - ./src:/app/src
       - ./tests:/app/tests
+      - ./scripts:/app/scripts
       - ./prompts:/app/prompts
     command: ["pytest", "-q"]
