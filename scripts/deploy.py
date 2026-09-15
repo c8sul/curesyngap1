@@ -26,7 +26,9 @@ RENDER_API = "https://api.render.com/v1"
 
 DEFAULT_SERVICE_NAME = "curesyngap1-agent"
 
-POLL_ATTEMPTS = 90
+# A free-instance build and rollout takes upwards of fifteen minutes, so this
+# waits half an hour before giving up and telling the operator to look.
+POLL_ATTEMPTS = 180
 POLL_SECONDS = 10.0
 
 # A deploy that has stopped moving, whether or not it worked.
@@ -73,10 +75,23 @@ async def latest_deploy(client: httpx.AsyncClient, service_id: str) -> dict | No
 
 
 async def trigger_deploy(client: httpx.AsyncClient, service_id: str) -> dict:
-    """Start a deploy and return it."""
+    """Start a deploy and return it.
+
+    Render answers 202 with an empty body, so the deploy this created is read
+    back from the deploys list rather than from the response.
+    """
     response = await client.post(f"{RENDER_API}/services/{service_id}/deploys", json={})
     response.raise_for_status()
-    return response.json()
+    if response.content:
+        return response.json()
+
+    started = await latest_deploy(client, service_id)
+    if not started:
+        raise DeployError(
+            f"Render accepted the deploy of {service_id} with "
+            f"{response.status_code} but lists no deploy for it."
+        )
+    return started
 
 
 async def wait_for(client: httpx.AsyncClient, service_id: str, deploy_id: str) -> dict:
