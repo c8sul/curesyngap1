@@ -24,9 +24,10 @@ services:
     dockerCommand: uvicorn --factory app.main:create_app --host 0.0.0.0 --port $PORT
     plan: free
     region: oregon
-    # Testing runs off the feature branch. Move this to `main` once the work
-    # merges, so a deploy tracks what has been reviewed.
-    branch: agent-steel-thread
+    # Testing runs off the branch carrying this file, which is also where
+    # /healthz lives. Move this to `main` once the work merges, so a deploy
+    # tracks what has been reviewed.
+    branch: render-deploy
     healthCheckPath: /healthz
     autoDeploy: true
     envVars:
