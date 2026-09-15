@@ -351,6 +351,25 @@ Two gates remain before real families are on it:
   stores. Extraction and recall are both on, deliberately and provisionally, and
   extraction is not selective. See [Retention is not settled](#retention-is-not-settled).
 
+## Known upstream issues
+
+**`READ` delivery status fails validation (`twilio-agent-connect` 2.4.0).** Every
+WhatsApp read receipt logs a `ValidationError` for
+`recipients.0.deliveryStatus`. The SDK hardcodes
+`Literal["INITIATED", "IN_PROGRESS", "DELIVERED", "COMPLETED", "FAILED"]` in
+three models (`tac/models/conversation.py`, `tac/models/memory.py`,
+`tac/models/tac.py`) and WhatsApp sends `READ`.
+
+It is log noise, not lost messages. The events that fail are delivery-status
+updates for the agent's own outbound messages, which TAC's `_is_own_message`
+check would discard anyway; validation simply happens first. Confirmed against
+the logs: every inbound message received a reply.
+
+Left alone rather than worked around, because patching a literal inside three
+SDK models to silence a log line is the more fragile choice. Report it upstream
+at <https://github.com/twilio/twilio-agent-connect-python> and drop this section
+when a fixed version is pinned.
+
 ## Ownership
 
 | Account | Owner |
