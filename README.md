@@ -205,6 +205,14 @@ A free service spins down when idle, and a cold start can exceed
 fallback reply instead of an answer. Warm it with a request to `/healthz` before
 a demo, or move to a paid plan before real families text it.
 
+The workspace's own plan does not change this: Render's workspace tiers and
+per-service compute plans are independent, and a free instance sleeps in a paid
+workspace too. Changing `plan: free` to `plan: starter` in `render.yaml` is what
+removes it. That re-deploys onto the new instance type and costs nothing else,
+since this service keeps no state of its own: conversation history is
+in-process and rebuilt from the next message, and what persists lives in
+Twilio's Memory Store.
+
 ## Making changes
 
 ```bash
