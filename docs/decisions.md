@@ -124,8 +124,19 @@ Whoever picks the transport picks the redaction with it.
 
 ## Open decision 3: what memory may retain about a family
 
-**Status:** Open, and live  
-**Decision owner:** Caitlyn Olmer, with Nathan on implementation
+**Status:** Open. Extraction and recall are both enabled in the meantime.  
+**Decision owner:** Caitlyn Olmer, with Nathan on implementation  
+**Interim choice made:** 2026-09-15
+
+### Interim choice
+
+Recall is left on, with `MEMORY_MODE=always`, while the team is the only group
+messaging the agent. The reasoning is that the behavior has to be visible to be
+decided on: with retrieval off, the agent reported having no memory of a
+contact while observations were accumulating in the store regardless. Nothing
+about that choice makes it the right setting for real families.
+
+Revisit before anyone outside the team is given the number.
 
 ### What is being written today
 

@@ -137,11 +137,18 @@ def build_server() -> TACFastAPIServer:
     # Each channel is registered only when its sender is configured. The
     # WhatsApp sandbox needs no Meta verification, so WhatsApp alone is a
     # working setup while carrier registration for SMS is still pending.
+    #
+    # `memory_mode` has to be passed: TAC defaults it to "never", which skips
+    # retrieval and hands the callback no memory at all, so a returning family
+    # is met as a stranger. "always" re-queries per message, using the message
+    # as the relevance query, which is what makes recall specific to what is
+    # being asked rather than to the conversation as a whole.
+    channel_config = {"memory_mode": settings.memory_mode}
     channels: list[MessagingChannel] = []
     if (os.environ.get("TWILIO_PHONE_NUMBER") or "").strip().startswith("+"):
-        channels.append(SMSChannel(tac))
+        channels.append(SMSChannel(tac, channel_config))
     if os.environ.get("TWILIO_WHATSAPP_NUMBER"):
-        channels.append(WhatsAppChannel(tac))
+        channels.append(WhatsAppChannel(tac, channel_config))
 
     if not channels:
         raise RuntimeError(

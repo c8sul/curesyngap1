@@ -51,6 +51,7 @@ class FakeServer:
 @dataclass
 class FakeChannel:
     tac: object
+    config: dict | None = None
     name: str = "STUB"
 
     def get_channel_name(self) -> str:
@@ -88,8 +89,10 @@ def wired(monkeypatch):
     monkeypatch.setattr(main.TACConfig, "from_env", classmethod(lambda cls: object()))
     monkeypatch.setattr(main, "AsyncOpenAI", lambda: client)
     monkeypatch.setattr(main, "TACFastAPIServer", FakeServer)
-    monkeypatch.setattr(main, "SMSChannel", lambda tac: FakeChannel(tac, "SMS"))
-    monkeypatch.setattr(main, "WhatsAppChannel", lambda tac: FakeChannel(tac, "WHATSAPP"))
+    monkeypatch.setattr(main, "SMSChannel", lambda tac, config: FakeChannel(tac, config, "SMS"))
+    monkeypatch.setattr(
+        main, "WhatsAppChannel", lambda tac, config: FakeChannel(tac, config, "WHATSAPP")
+    )
     monkeypatch.setattr(main, "with_tac_memory", lambda client, memory, context: client)
     monkeypatch.setattr(main, "HISTORIES", {})
     return tac, client
@@ -150,6 +153,28 @@ def test_a_phone_number_that_is_not_e164_registers_no_sms_channel(monkeypatch, w
     server = main.build_server()
 
     assert [channel.name for channel in server.messaging_channels] == ["WHATSAPP"]
+
+
+def test_every_channel_is_told_to_retrieve_memory(monkeypatch, wired):
+    """TAC defaults `memory_mode` to "never", which skips retrieval and hands
+    the callback no memory, so a returning family is met as a stranger. The
+    channels have to be constructed with it."""
+    monkeypatch.setenv("TWILIO_PHONE_NUMBER", "+15550100")
+
+    server = main.build_server()
+
+    assert [channel.config["memory_mode"] for channel in server.messaging_channels] == [
+        "always",
+        "always",
+    ]
+
+
+def test_the_memory_mode_can_be_overridden(monkeypatch, wired):
+    monkeypatch.setenv("MEMORY_MODE", "once")
+
+    server = main.build_server()
+
+    assert server.messaging_channels[0].config["memory_mode"] == "once"
 
 
 # --- knowledge source selection ---

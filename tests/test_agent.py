@@ -16,6 +16,7 @@ SETTINGS = AgentSettings(
     max_tool_iterations=3,
     top_k=3,
     min_knowledge_score=0.3,
+    memory_mode="always",
     reasoning_effort="none",
 )
 SYSTEM_PROMPT = "Answer from the knowledge base and always include the link."
@@ -95,6 +96,7 @@ async def test_reasoning_effort_is_omitted_when_unset():
             max_tool_iterations=3,
             top_k=3,
             min_knowledge_score=0.3,
+            memory_mode="always",
             reasoning_effort=None,
         ),
     )
@@ -185,6 +187,7 @@ async def test_timeout_yields_the_fallback_reply():
             max_tool_iterations=3,
             top_k=3,
             min_knowledge_score=0.3,
+            memory_mode="always",
             reasoning_effort="none",
         ),
     )
@@ -257,6 +260,7 @@ async def test_a_timeout_mid_tool_call_leaves_history_usable():
             max_tool_iterations=3,
             top_k=3,
             min_knowledge_score=0.3,
+            memory_mode="always",
             reasoning_effort="none",
         ),
     )

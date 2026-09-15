@@ -24,6 +24,7 @@ class AgentSettings:
     max_tool_iterations: int
     top_k: int
     min_knowledge_score: float
+    memory_mode: str
     reasoning_effort: str | None
 
     @classmethod
@@ -38,6 +39,9 @@ class AgentSettings:
             max_tool_iterations=int(os.environ.get("AGENT_MAX_TOOL_ITERATIONS", "3")),
             top_k=int(os.environ.get("KB_TOP_K", "5")),
             min_knowledge_score=float(os.environ.get("KB_MIN_SCORE", "0.3")),
+            # TAC defaults this to "never". "always" retrieves per message,
+            # "once" caches per conversation, "never" disables recall.
+            memory_mode=os.environ.get("MEMORY_MODE", "always"),
         )
 
 

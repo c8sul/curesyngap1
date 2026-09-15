@@ -10,6 +10,15 @@ Families and supporters message a number and ask plain-language questions:
 
 The agent answers briefly and links to the most relevant page on curesyngap1.org. It does not give medical advice. When it cannot answer from the knowledge base, it escalates the question to the team rather than guessing.
 
+> **Decision needed before real families use this: what memory may retain.**
+> Conversation Memory is enabled, and it writes observations and conversation
+> summaries from whatever a family says. Extraction is not selective, so a
+> family describing seizures or medications would have that retained and read
+> back on their next message. This is on deliberately, to make the behavior
+> visible while the project is still being tested by the team, and it is not a
+> settled policy. See [Memory](#memory) and
+> [Open decision 3](docs/decisions.md).
+
 ## How a message flows
 
 ```text
@@ -281,8 +290,27 @@ Two things are worth knowing before reading the output:
   back from `/Recall`, so a profile that looks empty may not be. That is why the
   check uses recall rather than the profile read alone.
 
-Retention is an open decision rather than a settled one, and the reasons are in
-[docs/decisions.md](docs/decisions.md).
+### Retention is not settled
+
+Recall is on, and that is a deliberate interim choice rather than a policy: the
+team is testing with its own phones, and turning it off would hide behavior that
+has to be understood before it is decided. Keep both facts in mind while working
+on this:
+
+- **What it buys.** A returning family does not repeat themselves. Ask "do you
+  have any memories about me" and the agent recites what it holds.
+- **What it costs.** Observations and summaries are written from whatever the
+  family said. Nothing distinguishes "wants to run a fundraiser" from "my
+  daughter has twenty seizures a day". The prompt forbids the agent from
+  repeating health details back, and that governs the model's output, not what
+  the platform stores.
+
+`MEMORY_MODE=never` turns recall off in one line, and `memoryExtractionEnabled:
+false` on the Conversation Configuration stops the writing. Identity resolution
+survives either, so a returning family is still recognized.
+
+Settle this before real families are on it. The questions, and the levers, are
+in [Open decision 3](docs/decisions.md).
 
 ## What is stubbed, and who owns it
 
@@ -292,8 +320,8 @@ Retention is an open decision rather than a settled one, and the reasons are in
   [docs/decisions.md](docs/decisions.md) for the options and why Twilio Email is
   not the obvious choice.
 
-- **Memory retention policy.** Memory itself is working, and that is the
-  problem to resolve. Identity resolution, traits, observations and conversation
+- **Memory retention policy.** Memory itself works. The policy is what is
+  missing. Identity resolution, traits, observations and conversation
   summaries are all live, and all are injected into the next message's context.
   Extraction is not selective, so a family describing seizures or medications
   would have that retained the same way as a fundraising question. What may be
@@ -320,8 +348,8 @@ Two gates remain before real families are on it:
   advice, and prompt injection. Not yet built.
 - **A retention decision.** The prompt stops the agent repeating a family's
   health details back to them, and does nothing about what Conversation Memory
-  stores. Extraction is live and not selective. See
-  [docs/decisions.md](docs/decisions.md).
+  stores. Extraction and recall are both on, deliberately and provisionally, and
+  extraction is not selective. See [Retention is not settled](#retention-is-not-settled).
 
 ## Ownership
 
