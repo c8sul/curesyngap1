@@ -30,6 +30,15 @@ services:
       - ./scripts:/app/scripts
     command: ["python", "scripts/chat.py"]
 
+  # Trigger or inspect a Render deploy:
+  #   docker compose run --rm deploy --status
+  deploy:
+    build: .
+    env_file: .env
+    volumes:
+      - ./scripts:/app/scripts
+    entrypoint: ["python", "scripts/deploy.py"]
+
   # One-time Twilio resource creation:
   #   docker compose run --rm provision --webhook-domain <public-host>
   provision:

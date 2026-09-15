@@ -117,9 +117,9 @@ docker compose up agent
 ngrok http 8000
 ```
 
-Or deploy the container to a host such as Render or Fly.io and use its URL. A
-deployed host is stable; a free ngrok host changes every restart, which means
-repeating step 4.
+Or deploy to Render for a stable hostname, which a free ngrok host is not: it
+changes every restart, and each change means repeating step 4. See
+[Deploying to Render](#deploying-to-render).
 
 ### 4. The Twilio resources
 
@@ -155,11 +155,93 @@ Sent WHATSAPP response via Actions API [conversation_id=conv_conversation_..., t
 | `src/app/tools/escalation.py` | Sending an unanswered question to a person |
 | `src/app/data/kb_fixture.json` | Offline page summaries, for tests and credential-free runs |
 | `src/app/config.py` | Environment-derived settings |
+| `render.yaml` | The deployed service definition, read by Render's Blueprints |
 | `prompts/system.md` | The live system prompt. Edit this file, not the code |
 | `scripts/provision.py` | Creates the Twilio resources, idempotently |
 | `scripts/chat.py` | Terminal conversation with the agent, no Twilio account needed |
 | `scripts/memory_e2e.py` | Checks the Conversation Memory round trip against the live account |
+| `scripts/deploy.py` | Triggers and watches a Render deploy |
 | `tests/` | Agent loop, tools, and prompt guarantees. No network calls |
+
+## Deploying to Render
+
+`render.yaml` defines the service, so a deploy is reviewable in the repository
+rather than living only in the dashboard. Render reads it through Blueprints.
+
+**Create it once.** With the repository connected (below), choose New →
+Blueprint in the Render dashboard and select it. Render prompts for every
+variable marked `sync: false`, which is all of the secrets and the
+account-specific ids; take them from your `.env`. Pushes to the branch named in
+`render.yaml` deploy automatically afterwards.
+
+### Connecting the repository is the repo owner's job
+
+Render's GitHub app has to be installed on the account that **owns**
+`curesyngap1`, and that account is a personal one rather than an organization.
+Only its owner can install a GitHub app on it; push access to the repository is
+not enough, and installing the app on a contributor's own account exposes only
+that account's repositories.
+
+For the owner, once: dashboard.render.com → the workspace picker at the top
+left → New → Blueprint. With no connection yet the page offers **Connect
+GitHub** rather than a repository list, which redirects to
+`github.com/apps/render/installations/new`. Install it on the account that owns
+the repository, choosing either all repositories or just `curesyngap1`. GitHub
+returns to Render with the repository now selectable.
+
+**Point Twilio at the new hostname.** The service comes up at
+`https://<name>.onrender.com`, and two places have to name it:
+
+```bash
+# The Conversation Configuration's status callback. Patches in place, so the
+# configuration keeps its id.
+docker compose run --rm provision --webhook-domain <name>.onrender.com
+```
+
+and the WhatsApp Sandbox Inbound URL, set to
+`https://<name>.onrender.com/whatsapp-sandbox-silence` at
+<https://www.twilio.com/console/sms/whatsapp/sandbox>. That field has no API, so
+it is a manual step every time the hostname changes.
+
+**Deploying and checking on it.** A push to the branch in `render.yaml` deploys
+on its own. For the cases a push does not cover — redeploying after an
+environment variable changes, or recovering a failed deploy — and to read the
+service URL back:
+
+```bash
+docker compose run --rm deploy --status   # report, change nothing
+docker compose run --rm deploy            # deploy and wait for it to go live
+```
+
+Both need `RENDER_API_KEY` in `.env`. Build and runtime logs live in the Render
+dashboard; the API does not serve them.
+
+**The serving command is not the Dockerfile's.** `render.yaml` sets
+`dockerCommand` to `uvicorn --factory app.main:create_app`, because the
+Dockerfile's `python -m app.main` serves TAC's app directly and so carries
+neither `/healthz` nor `/whatsapp-sandbox-silence`, both of which `create_app()`
+adds. It also binds `$PORT`, which is what Render routes to.
+
+**`/healthz` is the only route without a signature check.** Every other route
+validates a Twilio signature and would fail a health check that is not a signed
+Twilio request, so the health check has nowhere else to go. It reports that the
+process started and found its configuration, which is what separates a bad
+deploy from a working one.
+
+### The free plan sleeps
+
+A free service spins down when idle, and a cold start can exceed
+`AGENT_TIMEOUT_SECONDS`, so the first message after a quiet period gets the
+fallback reply instead of an answer. Warm it with a request to `/healthz` before
+a demo, or move to a paid plan before real families text it.
+
+The workspace's own plan does not change this: Render's workspace tiers and
+per-service compute plans are independent, and a free instance sleeps in a paid
+workspace too. Changing `plan: free` to `plan: starter` in `render.yaml` is what
+removes it. That re-deploys onto the new instance type and costs nothing else,
+since this service keeps no state of its own: conversation history is
+in-process and rebuilt from the next message, and what persists lives in
+Twilio's Memory Store.
 
 ## Making changes
 

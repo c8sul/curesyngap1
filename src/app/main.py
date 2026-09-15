@@ -57,6 +57,14 @@ def create_app() -> object:
     async def whatsapp_sandbox_silence() -> Response:
         return Response(content=SILENT_TWIML, media_type="application/xml")
 
+    # Liveness for a platform health check. Every other route requires a valid
+    # Twilio signature, so none of them can serve as one. Reaching this means
+    # the process started and `build_server()` found its configuration, which
+    # is what distinguishes a bad deploy from a working one.
+    @server.app.get("/healthz")
+    async def healthz() -> dict[str, str]:
+        return {"status": "ok"}
+
     return server.app
 
 
