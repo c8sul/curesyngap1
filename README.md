@@ -160,6 +160,7 @@ Sent WHATSAPP response via Actions API [conversation_id=conv_conversation_..., t
 | `scripts/provision.py` | Creates the Twilio resources, idempotently |
 | `scripts/chat.py` | Terminal conversation with the agent, no Twilio account needed |
 | `scripts/memory_e2e.py` | Checks the Conversation Memory round trip against the live account |
+| `scripts/deploy.py` | Triggers and watches a Render deploy |
 | `tests/` | Agent loop, tools, and prompt guarantees. No network calls |
 
 ## Deploying to Render
@@ -167,10 +168,26 @@ Sent WHATSAPP response via Actions API [conversation_id=conv_conversation_..., t
 `render.yaml` defines the service, so a deploy is reviewable in the repository
 rather than living only in the dashboard. Render reads it through Blueprints.
 
-**Create it once.** In the Render dashboard, connect the GitHub repository, then
-choose New → Blueprint and select it. Render prompts for every variable marked
-`sync: false`, which is all of the secrets and the account-specific ids; take
-them from your `.env`. Pushes to `main` deploy automatically afterwards.
+**Create it once.** With the repository connected (below), choose New →
+Blueprint in the Render dashboard and select it. Render prompts for every
+variable marked `sync: false`, which is all of the secrets and the
+account-specific ids; take them from your `.env`. Pushes to the branch named in
+`render.yaml` deploy automatically afterwards.
+
+### Connecting the repository is the repo owner's job
+
+Render's GitHub app has to be installed on the account that **owns**
+`curesyngap1`, and that account is a personal one rather than an organization.
+Only its owner can install a GitHub app on it; push access to the repository is
+not enough, and installing the app on a contributor's own account exposes only
+that account's repositories.
+
+For the owner, once: dashboard.render.com → the workspace picker at the top
+left → New → Blueprint. With no connection yet the page offers **Connect
+GitHub** rather than a repository list, which redirects to
+`github.com/apps/render/installations/new`. Install it on the account that owns
+the repository, choosing either all repositories or just `curesyngap1`. GitHub
+returns to Render with the repository now selectable.
 
 **Point Twilio at the new hostname.** The service comes up at
 `https://<name>.onrender.com`, and two places have to name it:
@@ -185,6 +202,19 @@ and the WhatsApp Sandbox Inbound URL, set to
 `https://<name>.onrender.com/whatsapp-sandbox-silence` at
 <https://www.twilio.com/console/sms/whatsapp/sandbox>. That field has no API, so
 it is a manual step every time the hostname changes.
+
+**Deploying and checking on it.** A push to the branch in `render.yaml` deploys
+on its own. For the cases a push does not cover — redeploying after an
+environment variable changes, or recovering a failed deploy — and to read the
+service URL back:
+
+```bash
+docker compose run --rm deploy --status   # report, change nothing
+docker compose run --rm deploy            # deploy and wait for it to go live
+```
+
+Both need `RENDER_API_KEY` in `.env`. Build and runtime logs live in the Render
+dashboard; the API does not serve them.
 
 **The serving command is not the Dockerfile's.** `render.yaml` sets
 `dockerCommand` to `uvicorn --factory app.main:create_app`, because the
