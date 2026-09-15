@@ -1,0 +1,74 @@
+services:
+  agent:
+    build: .
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      # Code and prompt are mounted so a reload picks up edits without a rebuild.
+      - ./src:/app/src
+      - ./prompts:/app/prompts
+    command:
+      - uvicorn
+      - --factory
+      - app.main:create_app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/src
+
+  # Local agent loop with no Twilio account: `docker compose run --rm chat`
+  chat:
+    build: .
+    env_file: .env
+    volumes:
+      - ./src:/app/src
+      - ./prompts:/app/prompts
+      - ./scripts:/app/scripts
+    command: ["python", "scripts/chat.py"]
+
+  # Trigger or inspect a Render deploy:
+  #   docker compose run --rm deploy --status
+  deploy:
+    build: .
+    env_file: .env
+    volumes:
+      - ./scripts:/app/scripts
+    entrypoint: ["python", "scripts/deploy.py"]
+
+  # One-time Twilio resource creation:
+  #   docker compose run --rm provision --webhook-domain <public-host>
+  provision:
+    build: .
+    env_file: .env
+    volumes:
+      - ./scripts:/app/scripts
+    entrypoint: ["python", "scripts/provision.py"]
+
+  # `docker compose run --rm memory-e2e --address whatsapp:+1...`
+  # Checks the Conversation Memory round trip against the live account.
+  memory-e2e:
+    build:
+      context: .
+    env_file: .env
+    volumes:
+      - ./src:/app/src
+      - ./scripts:/app/scripts
+    entrypoint: ["python", "scripts/memory_e2e.py"]
+
+  # `docker compose run --rm test`
+  test:
+    build:
+      context: .
+      args:
+        EXTRAS: dev
+    volumes:
+      - ./pyproject.toml:/app/pyproject.toml
+      - ./src:/app/src
+      - ./tests:/app/tests
+      - ./scripts:/app/scripts
+      - ./prompts:/app/prompts
+    command: ["pytest", "-q"]

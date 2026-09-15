@@ -1,58 +1,477 @@
-# CURE SYNGAP1 SMS Agent
+# CURE SYNGAP1 messaging agent
 
-A volunteer Global Impact Week project for [CURE SYNGAP1](https://curesyngap1.org/), a rare-disease nonprofit.
+A volunteer Global Impact Week project for [CURE SYNGAP1](https://curesyngap1.org/), a rare-disease nonprofit run almost entirely by volunteers.
 
-Families will be able to text a phone number and ask plain-language questions such as:
+Families and supporters message a number and ask plain-language questions:
 
 - "Tell me about SYNGAP1."
 - "How do I run a fundraiser?"
 - "How do I donate?"
 
-The agent should answer briefly and link the family to the most relevant page on curesyngap1.org.
+The agent answers briefly and links to the most relevant page on curesyngap1.org. It does not give medical advice. When it cannot answer from the knowledge base, it escalates the question to the team rather than guessing.
 
-## Intended flow
+> **Decision needed before real families use this: what memory may retain.**
+> Conversation Memory is enabled, and it writes observations and conversation
+> summaries from whatever a family says. Extraction is not selective, so a
+> family describing seizures or medications would have that retained and read
+> back on their next message. This is on deliberately, to make the behavior
+> visible while the project is still being tested by the team, and it is not a
+> settled policy. See [Memory](#memory) and
+> [Open decision 3](docs/decisions.md).
+
+## How a message flows
 
 ```text
-Twilio inbound webhook
-  -> retrieve relevant content from the knowledge base
-  -> call an OpenAI model
-  -> reply through Twilio Conversations
+WhatsApp or SMS
+  -> Twilio Conversation Orchestrator captures it (capture rules)
+  -> POST /webhook on this service, Twilio signature verified
+  -> Twilio Conversation Memory supplies who is asking and what they asked before
+  -> OpenAI model, with two tools: search the knowledge base, escalate
+  -> reply routed back to whichever channel the message arrived on
 ```
 
-## Current status
+## Quickstart
 
-- The Twilio account exists and is funded.
-- The Twilio Enterprise Knowledge crawl of curesyngap1.org is currently blocked. The site sits behind bot protection that returns HTTP 403 to the crawler.
-- We are asking for the Twilio crawler to be allowlisted. The fallback is to export the WordPress content, convert it, and import it into the knowledge base.
-- **Do not assume the knowledge base is populated yet.**
-- A phone number has not been provisioned.
-- Carrier registration, through toll-free verification or 10DLC, takes approximately 1–2+ weeks. Plan for local testing first.
+Docker is the only prerequisite. Everything runs in a container.
 
-## Open technical decision
+```bash
+git clone https://github.com/c8sul/curesyngap1.git
+cd curesyngap1
+cp .env.example .env
+docker compose run --rm test
+```
 
-The implementation stack is intentionally undecided. See [docs/decisions.md](docs/decisions.md) for the two options and their hosting implications.
+Tests and lint pass with no credentials at all. To talk to the agent, put an
+`OPENAI_API_KEY` in `.env` and run:
 
-Nathan will make the decision before application scaffolding begins. This repository currently contains documentation and configuration examples only.
+```bash
+docker compose run --rm chat
+```
 
-## Local setup
+That is the fastest way to judge a prompt or tool change. It exercises the same
+agent loop the live webhook calls, against the checked-in knowledge fixture (see
+[Knowledge](#knowledge)), and needs no Twilio account.
 
-Application setup instructions will be added after the implementation stack is selected and scaffolded.
+## Serving a real channel
 
-Copy `.env.example` to `.env` when local development begins. Never commit credentials or secrets.
+Four things have to line up: credentials, a sender, a public URL, and the Twilio
+resources that tie them together.
+
+### 1. Credentials
+
+Ask Caitlyn for access to the Twilio account and the OpenAI project, then fill in
+`.env`:
+
+| Variable | Where it comes from |
+| --- | --- |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` | Twilio Console home page |
+| `OPENAI_API_KEY` | the SYNGAP OpenAI project |
+
+Everything else in `.env` is either optional or created for you in step 4.
+
+### 2. A sender
+
+WhatsApp through Twilio's sandbox is the fastest path, because it needs no
+Meta Business verification, no approved sender, and no carrier registration.
+`.env.example` ships configured for it.
+
+1. Open the **Try WhatsApp** page in the legacy Console:
+   <https://www.twilio.com/console/sms/whatsapp/sandbox>. Acknowledge the terms,
+   click **Confirm**, and note the join code.
+
+   Do not use Messaging > Senders > WhatsApp Senders > Create new sender. That is
+   sender self-signup, which requires a Facebook login and a Meta Business
+   Portfolio, and takes weeks.
+
+2. From the phone you want to test with, send `join <code>` over WhatsApp to
+   **+1 415 523 8886**. It replies to confirm. That code is what routes your
+   messages to this Twilio account's sandbox.
+
+3. Leave `TWILIO_WHATSAPP_NUMBER=whatsapp:+14155238886` in `.env`.
+
+4. On that same Try WhatsApp page, set the sandbox's **Inbound URL** to
+   `https://<your-public-host>/whatsapp-sandbox-silence`. Left at its default,
+   the sandbox echoes "You said ..." to every user alongside the real answer.
+   That endpoint returns empty TwiML, which sends the user nothing.
+
+For SMS instead, set `TWILIO_PHONE_NUMBER` to an SMS-capable Twilio number in
+E.164. Messaging US numbers additionally requires toll-free verification or
+10DLC registration, which takes one to three weeks.
+
+At least one sender is required. Configuring both does not merge a contact's two
+threads: Conversation Memory keys a profile on the identifier type, so
+`whatsapp:+1...` under `whatsapp` and `+1...` under `phone` are two identifiers
+for one person, and the conversation grouping is per channel type as well. Someone
+who switches channels starts over.
+
+### 3. A public URL
+
+Twilio has to reach this service, so it needs a hostname that resolves from the
+internet. Either works:
+
+```bash
+# Local, in one terminal
+docker compose up agent
+
+# and a tunnel in another
+ngrok http 8000
+```
+
+Or deploy to Render for a stable hostname, which a free ngrok host is not: it
+changes every restart, and each change means repeating step 4. See
+[Deploying to Render](#deploying-to-render).
+
+### 4. The Twilio resources
+
+```bash
+docker compose run --rm provision --webhook-domain <your-public-host>
+```
+
+Pass the host only, with no scheme and no path. The script creates, or reuses, a
+scoped API key, a Memory Store, and a Conversation Configuration, then prints the
+`.env` lines to save. Re-running is safe: it reuses what already exists and
+patches the configuration in place, so changing `--webhook-domain` or adding a
+sender keeps the same configuration id.
+
+`--list` shows what exists on the account.
+
+### 5. Send a message
+
+Message your sender and watch the `docker compose up agent` terminal. A healthy
+round trip logs a started conversation and a sent response:
+
+```text
+CONVERSATION | Started WHATSAPP conversation [conversation_id=conv_conversation_...]
+Sent WHATSAPP response via Actions API [conversation_id=conv_conversation_..., to_address=wh***NNNN]
+```
+
+## Layout
+
+| Path | Contains |
+| --- | --- |
+| `src/app/main.py` | TAC wiring, channel registration, and the `on_message_ready` callback |
+| `src/app/agent.py` | The agent loop: model call, tool calls, iteration cap, timeout fallback |
+| `src/app/tools/knowledge.py` | Knowledge search, over the fixture or Enterprise Knowledge |
+| `src/app/tools/escalation.py` | Sending an unanswered question to a person |
+| `src/app/data/kb_fixture.json` | Offline page summaries, for tests and credential-free runs |
+| `src/app/config.py` | Environment-derived settings |
+| `render.yaml` | The deployed service definition, read by Render's Blueprints |
+| `prompts/system.md` | The live system prompt. Edit this file, not the code |
+| `scripts/provision.py` | Creates the Twilio resources, idempotently |
+| `scripts/chat.py` | Terminal conversation with the agent, no Twilio account needed |
+| `scripts/memory_e2e.py` | Checks the Conversation Memory round trip against the live account |
+| `scripts/deploy.py` | Triggers and watches a Render deploy |
+| `tests/` | Agent loop, tools, and prompt guarantees. No network calls |
+
+## Deploying to Render
+
+`render.yaml` defines the service, so a deploy is reviewable in the repository
+rather than living only in the dashboard. Render reads it through Blueprints.
+
+**Create it once.** With the repository connected (below), choose New →
+Blueprint in the Render dashboard and select it. Render prompts for every
+variable marked `sync: false`, which is all of the secrets and the
+account-specific ids; take them from your `.env`. Pushes to the branch named in
+`render.yaml` deploy automatically afterwards.
+
+### Connecting the repository is the repo owner's job
+
+Render's GitHub app has to be installed on the account that **owns**
+`curesyngap1`, and that account is a personal one rather than an organization.
+Only its owner can install a GitHub app on it; push access to the repository is
+not enough, and installing the app on a contributor's own account exposes only
+that account's repositories.
+
+For the owner, once: dashboard.render.com → the workspace picker at the top
+left → New → Blueprint. With no connection yet the page offers **Connect
+GitHub** rather than a repository list, which redirects to
+`github.com/apps/render/installations/new`. Install it on the account that owns
+the repository, choosing either all repositories or just `curesyngap1`. GitHub
+returns to Render with the repository now selectable.
+
+**Point Twilio at the new hostname.** The service comes up at
+`https://<name>.onrender.com`, and two places have to name it:
+
+```bash
+# The Conversation Configuration's status callback. Patches in place, so the
+# configuration keeps its id.
+docker compose run --rm provision --webhook-domain <name>.onrender.com
+```
+
+and the WhatsApp Sandbox Inbound URL, set to
+`https://<name>.onrender.com/whatsapp-sandbox-silence` at
+<https://www.twilio.com/console/sms/whatsapp/sandbox>. That field has no API, so
+it is a manual step every time the hostname changes.
+
+**Deploying and checking on it.** A push to the branch in `render.yaml` deploys
+on its own. For the cases a push does not cover — redeploying after an
+environment variable changes, or recovering a failed deploy — and to read the
+service URL back:
+
+```bash
+docker compose run --rm deploy --status   # report, change nothing
+docker compose run --rm deploy            # deploy and wait for it to go live
+```
+
+Both need `RENDER_API_KEY` in `.env`. Build and runtime logs live in the Render
+dashboard; the API does not serve them.
+
+**The serving command is not the Dockerfile's.** `render.yaml` sets
+`dockerCommand` to `uvicorn --factory app.main:create_app`, because the
+Dockerfile's `python -m app.main` serves TAC's app directly and so carries
+neither `/healthz` nor `/whatsapp-sandbox-silence`, both of which `create_app()`
+adds. It also binds `$PORT`, which is what Render routes to.
+
+**`/healthz` is the only route without a signature check.** Every other route
+validates a Twilio signature and would fail a health check that is not a signed
+Twilio request, so the health check has nowhere else to go. It reports that the
+process started and found its configuration, which is what separates a bad
+deploy from a working one.
+
+### The free plan sleeps
+
+A free service spins down when idle, and a cold start can exceed
+`AGENT_TIMEOUT_SECONDS`, so the first message after a quiet period gets the
+fallback reply instead of an answer. Warm it with a request to `/healthz` before
+a demo, or move to a paid plan before real families text it.
+
+The workspace's own plan does not change this: Render's workspace tiers and
+per-service compute plans are independent, and a free instance sleeps in a paid
+workspace too. Changing `plan: free` to `plan: starter` in `render.yaml` is what
+removes it. That re-deploys onto the new instance type and costs nothing else,
+since this service keeps no state of its own: conversation history is
+in-process and rebuilt from the next message, and what persists lives in
+Twilio's Memory Store.
+
+## Making changes
+
+```bash
+docker compose run --rm test     # pytest and ruff
+docker compose up agent          # reloads on edits to src/
+```
+
+**Agent behavior** lives in `prompts/system.md`. It is loaded at runtime and
+mounted into the container, so editing it and restarting is enough. A test
+asserts the medical-advice prohibition and both tool rules are still present, so
+they cannot be dropped by accident.
+
+**A new tool** is one `@function_tool` function in `src/app/tools/`, added to the
+`tools` mapping in `src/app/agent.py`. Tools are built per turn, which is what
+lets the escalation tool carry conversation details the model is never asked for.
+
+**Knowledge** comes from whatever satisfies the `KnowledgeSource` protocol in
+`src/app/tools/knowledge.py`, either Enterprise Knowledge or the offline
+fixture. See [Knowledge](#knowledge).
+
+## Knowledge
+
+Answers come from the Enterprise Knowledge base **Syngap1**
+(`know_knowledgebase_01m2gmmj26e35ty0xf2kkgfk16`), which holds a content
+snapshot of curesyngap1.org uploaded as six documents:
+
+| Document | Covers | Answers link to |
+| --- | --- | --- |
+| `01-about-syngap1` | The condition, epilepsy, autism, life expectancy, census | `/what-is-syngap1/` |
+| `02-treatment` | Treatment status and the therapeutic pipeline | `/syngap1-treatment/` |
+| `03-family-resources` | Newly diagnosed, adulthood, siblings, undiagnosed, getting involved | `/syngap1-resources-for-newly-diagnosed-families/` |
+| `04-clinical-care` | ICD codes, clinicians, clinical trials, registries, studies | `/doctors/` |
+| `05-research-grants` | Grants, the grant program, iPSC models | `/resources/grants/` |
+| `06-about-the-organization` | Mission, team, finances, impact | `/mission-and-values/` |
+
+Set the base to search, and nothing else:
+
+```bash
+TWILIO_KNOWLEDGE_BASE_ID=know_knowledgebase_01m2gmmj26e35ty0xf2kkgfk16
+```
+
+### How a passage becomes a link
+
+Every answer has to link the family to a page, and the Search API does not
+reliably supply one: `documentUrl` is null for content uploaded as files rather
+than crawled, which is how this base is populated. `_resolve_url` in
+`src/app/tools/knowledge.py` tries three things in order:
+
+1. The chunk's own `documentUrl`. Populated only for crawled content.
+2. A curesyngap1.org URL written inside the passage text. The uploaded bundles
+   name the page each section came from, so about one chunk in six carries its
+   exact link.
+3. The document's landing page, from `DOCUMENT_URLS`. All twenty URLs embedded
+   in the six documents were checked against the live site and return 200.
+
+Step 3 is approximate by nature, and it is the common case. A bundle covers
+several pages, so a passage about clinical trials inside `04-clinical-care` is
+linked to `/doctors/` rather than to `/clinical-trials/`. The answer text stays
+correct and the link lands the reader on a real, related page, but it is not
+always the page the passage came from. Crawling the site instead of uploading
+files would populate `documentUrl` and remove the guess; the crawler is blocked
+by the site's bot protection, which Ryan owns unblocking.
+
+This is also why `TwilioKnowledgeSource` calls the Search API directly rather
+than through `tac`'s `search_knowledge_base()`: that helper parses responses
+into `KnowledgeChunkResult`, which keeps `content`, `knowledgeId`, `createdAt`
+and `score` and discards `documentTitle` and `documentUrl`.
+
+### Relevance
+
+Semantic search returns its nearest matches for any question at all, so an
+off-topic question comes back with passages rather than with nothing. `KB_MIN_SCORE`
+(default `0.3`) drops the weak tail, and it cannot do more than that: "what is
+the weather in Denver" matches the Colorado clinic page at 0.8. Judging whether
+the passages actually answer the question is the model's job, which is what
+prompt rules 6 and 12 are for. Verified: that question gets a refusal, not an
+invented answer.
+
+### Known content gaps
+
+The base has no donate, fundraise, events or contact page. Two of the three
+questions this agent exists to answer are affected: "How do I donate?" is
+escalated rather than answered, and "How do I run a fundraiser?" returns the
+`giving@cureSYNGAP1.org` address from a resources page instead of the
+fundraising page. Adding those pages to the knowledge base is the single highest
+-value change available, and it needs no code.
+
+### Answering with no Twilio account
+
+Leave `TWILIO_KNOWLEDGE_BASE_ID` unset and the agent searches
+`src/app/data/kb_fixture.json`: eight hand-written page summaries matched by
+keyword overlap. That is what `docker compose run --rm chat` and the whole test
+suite use, so both run with no credentials. It is a test double, not content
+anyone should act on, and it behaves differently from the real thing in one way
+that matters: keyword matching returns nothing for an unrelated question, where
+semantic search returns weak matches.
+
+## Memory
+
+A returning contact is recognized without re-introducing themselves. Twilio
+Conversation Memory does the work; this application only passes the retrieved
+memory into the model call.
+
+Check it against the live account:
+
+```bash
+docker compose run --rm memory-e2e --address whatsapp:+1...
+```
+
+Four steps, each reported pass or fail: identity resolution (the address to a
+profile id), the profile read, recall (observations, summaries, past
+communications), and injection (the prompt prepended to the model call). The
+last step prints exactly what the model is told about that contact, which is the
+only reliable way to see what has accumulated.
+
+A profile appears on the contact's first inbound message, so the check reports
+no profile until one has been sent.
+
+Two things are worth knowing before reading the output:
+
+- **The identifier type matters.** A WhatsApp profile is keyed on the full
+  address, `whatsapp:+1...`, under identifier type `whatsapp`; an SMS one on the
+  bare E.164 number under `phone`. Looking up the wrong type returns no profile,
+  which is indistinguishable from a first-time contact. Valid types are `email`,
+  `phone`, `pushUserID`, `whatsapp` and `chat`.
+- **`GET /Profiles/{id}` returns traits only.** Observations and summaries come
+  back from `/Recall`, so a profile that looks empty may not be. That is why the
+  check uses recall rather than the profile read alone.
+
+### Retention is not settled
+
+Recall is on, and that is a deliberate interim choice rather than a policy: the
+team is testing with its own phones, and turning it off would hide behavior that
+has to be understood before it is decided. Keep both facts in mind while working
+on this:
+
+- **What it buys.** A returning family does not repeat themselves. Ask "do you
+  have any memories about me" and the agent recites what it holds.
+- **What it costs.** Observations and summaries are written from whatever the
+  family said. Nothing distinguishes "wants to run a fundraiser" from "my
+  daughter has twenty seizures a day". The prompt forbids the agent from
+  repeating health details back, and that governs the model's output, not what
+  the platform stores.
+
+`MEMORY_MODE=never` turns recall off in one line, and `memoryExtractionEnabled:
+false` on the Conversation Configuration stops the writing. Identity resolution
+survives either, so a returning family is still recognized.
+
+Settle this before real families are on it. The questions, and the levers, are
+in [Open decision 3](docs/decisions.md).
+
+## What is stubbed, and who owns it
+
+- **Escalation delivery.** `LoggingEscalation` records and logs the question
+  instead of sending it. The agent, the prompt rule, and the tests are complete;
+  only the transport is missing. See
+  [docs/decisions.md](docs/decisions.md) for the options and why Twilio Email is
+  not the obvious choice.
+
+- **Memory retention policy.** Memory itself works. The policy is what is
+  missing. Identity resolution, traits, observations and conversation
+  summaries are all live, and all are injected into the next message's context.
+  Extraction is not selective, so a family describing seizures or medications
+  would have that retained the same way as a fundraising question. What may be
+  kept, for how long, and what families are told about it is an open decision:
+  see [docs/decisions.md](docs/decisions.md). Run
+  `docker compose run --rm memory-e2e --address <address>` to see exactly what is
+  stored about a contact.
+
+- **Voice.** Not wired. TAC supplies `VoiceChannel` and ConversationRelay when
+  text is proven.
+
+## Safety
+
+The agent must not give medical advice, diagnose, or interpret symptoms or test
+results. Those rules live in [prompts/system.md](prompts/system.md), a test
+asserts they are still present, and a Foundation content reviewer signs off
+before launch. Spot-checked: asked whether to increase a child's Keppra dose,
+the agent declines, directs the family to the prescribing clinician, and names
+the emergency signs to act on.
+
+Two gates remain before real families are on it:
+
+- **The adversarial test set.** Off-topic questions, attempts to extract medical
+  advice, and prompt injection. Not yet built.
+- **A retention decision.** The prompt stops the agent repeating a family's
+  health details back to them, and does nothing about what Conversation Memory
+  stores. Extraction and recall are both on, deliberately and provisionally, and
+  extraction is not selective. See [Retention is not settled](#retention-is-not-settled).
+
+## Known upstream issues
+
+**WhatsApp contacts cannot be resolved to a memory profile
+(`twilio-agent-connect` 2.4.0).** `tac.retrieve_memory()` resolves a profile
+itself when the session carries no `profile_id`, deriving the identifier type as
+`"email" if "@" in address else "phone"` and passing the address through
+unchanged (`tac/core/tac.py:180`). A WhatsApp address is `whatsapp:+1...` and
+its profile is keyed on identifier type `whatsapp` with the prefix intact, so
+the lookup matches nothing and a returning family is met as a stranger.
+
+`src/app/memory.py` works around it by resolving the profile and setting it on
+the session before retrieval, which is why the channels keep TAC's default
+`memory_mode` of `never`: retrieval happens in `_recall`, not in TAC. Report it
+upstream and delete `app.memory` when a fixed version is pinned.
+
+**`READ` delivery status fails validation (`twilio-agent-connect` 2.4.0).** Every
+WhatsApp read receipt logs a `ValidationError` for
+`recipients.0.deliveryStatus`. The SDK hardcodes
+`Literal["INITIATED", "IN_PROGRESS", "DELIVERED", "COMPLETED", "FAILED"]` in
+three models (`tac/models/conversation.py`, `tac/models/memory.py`,
+`tac/models/tac.py`) and WhatsApp sends `READ`.
+
+It is log noise, not lost messages. The events that fail are delivery-status
+updates for the agent's own outbound messages, which TAC's `_is_own_message`
+check would discard anyway; validation simply happens first. Confirmed against
+the logs: every inbound message received a reply.
+
+Left alone rather than worked around, because patching a literal inside three
+SDK models to silence a log line is the more fragile choice. Report it upstream
+at <https://github.com/twilio/twilio-agent-connect-python> and drop this section
+when a fixed version is pinned.
 
 ## Ownership
 
-Assign the accountable owner for each external account before deployment.
-
 | Account | Owner |
 | --- | --- |
-| Twilio | TBD |
-| OpenAI | TBD |
+| Twilio | Caitlyn Olmer |
+| OpenAI | Caitlyn Olmer |
 | Hosting | TBD |
-
-## Safety and response principles
-
-The draft agent behavior is documented in [prompts/system.md](prompts/system.md). In short, the agent should provide concise, source-linked information and must not give medical advice or interpret symptoms.
 
 ## License
 

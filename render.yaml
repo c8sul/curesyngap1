@@ -1,0 +1,78 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+#
+# Create or update the service from this file with Render's Blueprints flow,
+# which reads it from the repository. The secrets are marked `sync: false`, so
+# Render prompts for them once and stores them; they are never held here.
+#
+# The public URL this service is assigned has to reach Twilio in two places,
+# neither of which this file controls:
+#
+#   1. The Conversation Configuration's status callback. Run
+#      `docker compose run --rm provision --webhook-domain <host>` with the
+#      Render host to point it here.
+#   2. The WhatsApp Sandbox Inbound URL, set to `<host>/whatsapp-sandbox-silence`
+#      in the Console. It has no API.
+services:
+  - type: web
+    name: curesyngap1-agent
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # `python -m app.main` serves TAC's app directly and so carries neither
+    # /healthz nor the sandbox silencer, both of which `create_app()` adds.
+    # Render routes traffic to $PORT.
+    dockerCommand: uvicorn --factory app.main:create_app --host 0.0.0.0 --port $PORT
+    plan: free
+    region: oregon
+    # Testing runs off the branch carrying this file, which is also where
+    # /healthz lives. Move this to `main` once the work merges, so a deploy
+    # tracks what has been reviewed.
+    branch: render-deploy
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      # Secrets. Render prompts for each on first sync and keeps it thereafter.
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_API_KEY
+        sync: false
+      - key: TWILIO_API_SECRET
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      # Account resources. Ids rather than secrets, but they differ per account,
+      # so they are prompted for too rather than baked in.
+      - key: TWILIO_CONVERSATION_CONFIGURATION_ID
+        sync: false
+      - key: TWILIO_MEMORY_STORE_ID
+        sync: false
+      - key: TWILIO_KNOWLEDGE_BASE_ID
+        sync: false
+      # Senders. WhatsApp alone is a working setup; the shared sandbox sender
+      # needs no Meta verification. Leave TWILIO_PHONE_NUMBER empty until
+      # carrier registration for SMS is done.
+      - key: TWILIO_WHATSAPP_NUMBER
+        value: whatsapp:+14155238886
+      - key: TWILIO_PHONE_NUMBER
+        value: ""
+      # Agent tuning. These match .env.example; see it for what each does.
+      - key: OPENAI_MODEL
+        value: gpt-5.6-luna
+      - key: AGENT_REASONING_EFFORT
+        value: none
+      - key: AGENT_TIMEOUT_SECONDS
+        value: "12"
+      - key: AGENT_MAX_TOOL_ITERATIONS
+        value: "3"
+      - key: KB_TOP_K
+        value: "5"
+      - key: KB_MIN_SCORE
+        value: "0.3"
+      # Recall of what is remembered about a family. What may be retained is an
+      # open decision; see docs/decisions.md before pointing real families here.
+      - key: MEMORY_MODE
+        value: always
+      - key: TWILIO_LOG_LEVEL
+        value: INFO
