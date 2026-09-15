@@ -11,6 +11,8 @@ from typing import Any
 
 import pytest
 from fakes import FakeMessage, FakeOpenAI
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from app import main
 from app.agent import Agent
@@ -73,7 +75,9 @@ class FakeTAC:
 class FakeServer:
     tac: FakeTAC
     messaging_channels: list = field(default_factory=list)
-    app: object = None
+    # A real app, because `create_app` registers its own routes on it and they
+    # are part of what the deployed service serves.
+    app: FastAPI = field(default_factory=FastAPI)
 
 
 @dataclass
@@ -338,3 +342,33 @@ def test_the_transcript_keeps_only_what_a_person_needs_to_read():
         {"role": "user", "content": "how do I fundraise?"},
         {"role": "assistant", "content": "Start here: ..."},
     ]
+
+
+# --- the routes create_app adds ---
+#
+# `python -m app.main` serves TAC's app directly and has neither of these, so
+# these tests also pin the reason the deployed command is `uvicorn --factory
+# app.main:create_app` rather than the Dockerfile's default.
+
+
+def test_the_health_check_answers_without_a_twilio_signature(wired):
+    """Every other route validates a Twilio signature, so a platform health
+    check has nowhere else to go."""
+    client = TestClient(main.create_app())
+
+    response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_the_sandbox_silencer_returns_empty_twiml(wired):
+    """The WhatsApp sandbox echoes "You said ..." at the user unless its
+    Inbound URL is answered with a well-formed, empty TwiML document."""
+    client = TestClient(main.create_app())
+
+    response = client.post("/whatsapp-sandbox-silence")
+
+    assert response.status_code == 200
+    assert "<Response></Response>" in response.text
+    assert "You said" not in response.text
