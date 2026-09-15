@@ -16,7 +16,7 @@ The agent answers briefly and links to the most relevant page on curesyngap1.org
 WhatsApp or SMS
   -> Twilio Conversation Orchestrator captures it (capture rules)
   -> POST /webhook on this service, Twilio signature verified
-  -> Twilio Conversation Memory supplies who is asking
+  -> Twilio Conversation Memory supplies who is asking and what they asked before
   -> OpenAI model, with two tools: search the knowledge base, escalate
   -> reply routed back to whichever channel the message arrived on
 ```
@@ -40,8 +40,8 @@ docker compose run --rm chat
 ```
 
 That is the fastest way to judge a prompt or tool change. It exercises the same
-agent loop the live webhook calls, against the checked-in knowledge fixture, and
-needs no Twilio account.
+agent loop the live webhook calls, against the checked-in knowledge fixture (see
+[Knowledge](#knowledge)), and needs no Twilio account.
 
 ## Serving a real channel
 
@@ -89,8 +89,11 @@ For SMS instead, set `TWILIO_PHONE_NUMBER` to an SMS-capable Twilio number in
 E.164. Messaging US numbers additionally requires toll-free verification or
 10DLC registration, which takes one to three weeks.
 
-At least one sender is required. Configure both and a returning contact's SMS and
-WhatsApp threads merge automatically, since both carry the same phone number.
+At least one sender is required. Configuring both does not merge a contact's two
+threads: Conversation Memory keys a profile on the identifier type, so
+`whatsapp:+1...` under `whatsapp` and `+1...` under `phone` are two identifiers
+for one person, and the conversation grouping is per channel type as well. Someone
+who switches channels starts over.
 
 ### 3. A public URL
 
@@ -141,11 +144,12 @@ Sent WHATSAPP response via Actions API [conversation_id=conv_conversation_..., t
 | `src/app/agent.py` | The agent loop: model call, tool calls, iteration cap, timeout fallback |
 | `src/app/tools/knowledge.py` | Knowledge search, over the fixture or Enterprise Knowledge |
 | `src/app/tools/escalation.py` | Sending an unanswered question to a person |
-| `src/app/data/kb_fixture.json` | Stand-in page summaries, used until the site crawl succeeds |
+| `src/app/data/kb_fixture.json` | Offline page summaries, for tests and credential-free runs |
 | `src/app/config.py` | Environment-derived settings |
 | `prompts/system.md` | The live system prompt. Edit this file, not the code |
 | `scripts/provision.py` | Creates the Twilio resources, idempotently |
 | `scripts/chat.py` | Terminal conversation with the agent, no Twilio account needed |
+| `scripts/memory_e2e.py` | Checks the Conversation Memory round trip against the live account |
 | `tests/` | Agent loop, tools, and prompt guarantees. No network calls |
 
 ## Making changes
@@ -165,22 +169,122 @@ they cannot be dropped by accident.
 lets the escalation tool carry conversation details the model is never asked for.
 
 **Knowledge** comes from whatever satisfies the `KnowledgeSource` protocol in
-`src/app/tools/knowledge.py`. Setting `TWILIO_KNOWLEDGE_BASE_ID` switches from
-the fixture to Enterprise Knowledge with no other change.
+`src/app/tools/knowledge.py`, either Enterprise Knowledge or the offline
+fixture. See [Knowledge](#knowledge).
+
+## Knowledge
+
+Answers come from the Enterprise Knowledge base **Syngap1**
+(`know_knowledgebase_01m2gmmj26e35ty0xf2kkgfk16`), which holds a content
+snapshot of curesyngap1.org uploaded as six documents:
+
+| Document | Covers | Answers link to |
+| --- | --- | --- |
+| `01-about-syngap1` | The condition, epilepsy, autism, life expectancy, census | `/what-is-syngap1/` |
+| `02-treatment` | Treatment status and the therapeutic pipeline | `/syngap1-treatment/` |
+| `03-family-resources` | Newly diagnosed, adulthood, siblings, undiagnosed, getting involved | `/syngap1-resources-for-newly-diagnosed-families/` |
+| `04-clinical-care` | ICD codes, clinicians, clinical trials, registries, studies | `/doctors/` |
+| `05-research-grants` | Grants, the grant program, iPSC models | `/resources/grants/` |
+| `06-about-the-organization` | Mission, team, finances, impact | `/mission-and-values/` |
+
+Set the base to search, and nothing else:
+
+```bash
+TWILIO_KNOWLEDGE_BASE_ID=know_knowledgebase_01m2gmmj26e35ty0xf2kkgfk16
+```
+
+### How a passage becomes a link
+
+Every answer has to link the family to a page, and the Search API does not
+reliably supply one: `documentUrl` is null for content uploaded as files rather
+than crawled, which is how this base is populated. `_resolve_url` in
+`src/app/tools/knowledge.py` tries three things in order:
+
+1. The chunk's own `documentUrl`. Populated only for crawled content.
+2. A curesyngap1.org URL written inside the passage text. The uploaded bundles
+   name the page each section came from, so about one chunk in six carries its
+   exact link.
+3. The document's landing page, from `DOCUMENT_URLS`. All twenty URLs embedded
+   in the six documents were checked against the live site and return 200.
+
+Step 3 is approximate by nature, and it is the common case. A bundle covers
+several pages, so a passage about clinical trials inside `04-clinical-care` is
+linked to `/doctors/` rather than to `/clinical-trials/`. The answer text stays
+correct and the link lands the reader on a real, related page, but it is not
+always the page the passage came from. Crawling the site instead of uploading
+files would populate `documentUrl` and remove the guess; the crawler is blocked
+by the site's bot protection, which Ryan owns unblocking.
+
+This is also why `TwilioKnowledgeSource` calls the Search API directly rather
+than through `tac`'s `search_knowledge_base()`: that helper parses responses
+into `KnowledgeChunkResult`, which keeps `content`, `knowledgeId`, `createdAt`
+and `score` and discards `documentTitle` and `documentUrl`.
+
+### Relevance
+
+Semantic search returns its nearest matches for any question at all, so an
+off-topic question comes back with passages rather than with nothing. `KB_MIN_SCORE`
+(default `0.3`) drops the weak tail, and it cannot do more than that: "what is
+the weather in Denver" matches the Colorado clinic page at 0.8. Judging whether
+the passages actually answer the question is the model's job, which is what
+prompt rules 6 and 12 are for. Verified: that question gets a refusal, not an
+invented answer.
+
+### Known content gaps
+
+The base has no donate, fundraise, events or contact page. Two of the three
+questions this agent exists to answer are affected: "How do I donate?" is
+escalated rather than answered, and "How do I run a fundraiser?" returns the
+`giving@cureSYNGAP1.org` address from a resources page instead of the
+fundraising page. Adding those pages to the knowledge base is the single highest
+-value change available, and it needs no code.
+
+### Answering with no Twilio account
+
+Leave `TWILIO_KNOWLEDGE_BASE_ID` unset and the agent searches
+`src/app/data/kb_fixture.json`: eight hand-written page summaries matched by
+keyword overlap. That is what `docker compose run --rm chat` and the whole test
+suite use, so both run with no credentials. It is a test double, not content
+anyone should act on, and it behaves differently from the real thing in one way
+that matters: keyword matching returns nothing for an unrelated question, where
+semantic search returns weak matches.
+
+## Memory
+
+A returning contact is recognized without re-introducing themselves. Twilio
+Conversation Memory does the work; this application only passes the retrieved
+memory into the model call.
+
+Check it against the live account:
+
+```bash
+docker compose run --rm memory-e2e --address whatsapp:+1...
+```
+
+Four steps, each reported pass or fail: identity resolution (the address to a
+profile id), the profile read, recall (observations, summaries, past
+communications), and injection (the prompt prepended to the model call). The
+last step prints exactly what the model is told about that contact, which is the
+only reliable way to see what has accumulated.
+
+A profile appears on the contact's first inbound message, so the check reports
+no profile until one has been sent.
+
+Two things are worth knowing before reading the output:
+
+- **The identifier type matters.** A WhatsApp profile is keyed on the full
+  address, `whatsapp:+1...`, under identifier type `whatsapp`; an SMS one on the
+  bare E.164 number under `phone`. Looking up the wrong type returns no profile,
+  which is indistinguishable from a first-time contact. Valid types are `email`,
+  `phone`, `pushUserID`, `whatsapp` and `chat`.
+- **`GET /Profiles/{id}` returns traits only.** Observations and summaries come
+  back from `/Recall`, so a profile that looks empty may not be. That is why the
+  check uses recall rather than the profile read alone.
+
+Retention is an open decision rather than a settled one, and the reasons are in
+[docs/decisions.md](docs/decisions.md).
 
 ## What is stubbed, and who owns it
-
-- **The knowledge base.** The Enterprise Knowledge crawl of curesyngap1.org is
-  blocked by the site's bot protection, which returns HTTP 403 to the crawler.
-  Ryan owns unblocking it, with a WordPress export as the fallback. Until then
-  the agent searches `src/app/data/kb_fixture.json`, eight hand-written page
-  summaries. Those URLs are plausible but only partly verified against the live
-  site, so treat answers as illustrative.
-
-  Enterprise Knowledge search returns `content`, `knowledge_id`, `created_at` and
-  `score` per chunk, with **no page URL**. Since every answer has to link
-  somewhere, `TwilioKnowledgeSource` maps `knowledge_id` to a URL through
-  `KNOWLEDGE_ID_URLS`. Populating that map is part of switching the crawl on.
 
 - **Escalation delivery.** `LoggingEscalation` records and logs the question
   instead of sending it. The agent, the prompt rule, and the tests are complete;
@@ -188,27 +292,36 @@ the fixture to Enterprise Knowledge with no other change.
   [docs/decisions.md](docs/decisions.md) for the options and why Twilio Email is
   not the obvious choice.
 
-- **Observation extraction.** Memory extraction is on, so a contact's profile is
-  created and matched by phone number, which is what stops a returning family
-  repeating themselves. Only the contact address is recorded. Observations, the
-  summaries of what was discussed, need a Conversational Intelligence operator
-  listed in the configuration's `intelligenceConfigurationIds`, and that list is
-  deliberately empty: an operator would extract the diagnoses and medications the
-  agent is forbidden to retain. See [docs/decisions.md](docs/decisions.md).
+- **Memory retention policy.** Memory itself is working, and that is the
+  problem to resolve. Identity resolution, traits, observations and conversation
+  summaries are all live, and all are injected into the next message's context.
+  Extraction is not selective, so a family describing seizures or medications
+  would have that retained the same way as a fundraising question. What may be
+  kept, for how long, and what families are told about it is an open decision:
+  see [docs/decisions.md](docs/decisions.md). Run
+  `docker compose run --rm memory-e2e --address <address>` to see exactly what is
+  stored about a contact.
 
 - **Voice.** Not wired. TAC supplies `VoiceChannel` and ConversationRelay when
   text is proven.
 
 ## Safety
 
-The agent must not give medical advice, diagnose, interpret symptoms or test
-results, or guarantee fundraising outcomes, and must not store a family's health
-details. Those rules live in [prompts/system.md](prompts/system.md) and a
-Foundation content reviewer signs off before launch.
+The agent must not give medical advice, diagnose, or interpret symptoms or test
+results. Those rules live in [prompts/system.md](prompts/system.md), a test
+asserts they are still present, and a Foundation content reviewer signs off
+before launch. Spot-checked: asked whether to increase a child's Keppra dose,
+the agent declines, directs the family to the prescribing clinician, and names
+the emergency signs to act on.
 
-The adversarial test set — off-topic questions, attempts to extract medical
-advice, prompt injection — is still to be built, and is the gate before real
-families are on it.
+Two gates remain before real families are on it:
+
+- **The adversarial test set.** Off-topic questions, attempts to extract medical
+  advice, and prompt injection. Not yet built.
+- **A retention decision.** The prompt stops the agent repeating a family's
+  health details back to them, and does nothing about what Conversation Memory
+  stores. Extraction is live and not selective. See
+  [docs/decisions.md](docs/decisions.md).
 
 ## Ownership
 

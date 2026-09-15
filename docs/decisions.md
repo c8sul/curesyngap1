@@ -122,38 +122,60 @@ which is fine for a stub read by one developer and not fine for logs shipped to
 an aggregator, because a family's question can itself contain health details.
 Whoever picks the transport picks the redaction with it.
 
-## Open decision 3: observation extraction
+## Open decision 3: what memory may retain about a family
 
-**Status:** Open  
+**Status:** Open, and live  
 **Decision owner:** Caitlyn Olmer, with Nathan on implementation
 
-### Context
+### What is being written today
 
-Conversation Memory writes two kinds of memory. Identity traits are written
-whenever `memoryExtractionEnabled` is true on the Conversation Configuration:
-a profile is created for the sender and matched by phone number on their next
-message, which is what lets a returning family skip re-introducing themselves.
-Observations, the free-text summaries of what was discussed, are produced by
-Conversational Intelligence operators, and an operator only runs if its
-intelligence configuration is listed in the configuration's
-`intelligenceConfigurationIds`. With that list empty, conversations close and no
-observation is written.
+`memoryExtractionEnabled` is true on the Conversation Configuration, and that
+alone drives the full extraction pipeline. The Memory Store carries its own
+`intelligenceServiceId`, created with the store, and its operators run without
+anything being listed in the configuration's `intelligenceConfigurationIds`.
 
-### The conflict to resolve first
+Three kinds of memory are therefore written and read back:
 
-An operator extracts whatever the conversation contains. Families describe
-seizures, medications and diagnoses, so a general-purpose observation operator
-would write exactly the health details the agent is forbidden to retain. Turning
-observations on is therefore a data-handling decision, not a configuration step.
+- **Traits.** The contact address, keyed by identifier type.
+- **Observations.** Short statements about the person, each carrying a `source`
+  of `intelligence_operatorresult_...`.
+- **Conversation summaries.** A paragraph per closed conversation, describing
+  what was asked and what the agent answered.
 
-Resolving it means answering: what an observation may contain, which operator
-enforces that, how long observations are retained, and what the foundation tells
-families about it.
+All three are injected into the model's context on the next message, as roughly
+1.5 KB of prompt. `docker compose run --rm memory-e2e --address <address>`
+prints exactly what the model is told about a contact.
 
-### What switching it on looks like
+### The decision this forces
 
-Each Memory Store is created with its own `intelligenceServiceId`. Attaching it
-to the Conversation Configuration is one PATCH of
-`intelligenceConfigurationIds`, which returns HTTP 202 and an operation to poll.
-Whether that service alone yields observations, or a purpose-built operator has
-to be defined first, is unverified.
+Extraction is not selective. Observations and summaries are written from
+whatever the family said, and families describe seizures, medications and
+diagnoses. Nothing in the pipeline distinguishes "wants to run a fundraiser"
+from "my daughter has twenty seizures a day", and the second would be retained
+the same way.
+
+The agent's prompt forbids repeating a family's health details back to them,
+but that rule governs the model's output, not what the platform stores. A
+prompt rule cannot constrain extraction.
+
+So, before real families are on this:
+
+1. What may be retained about a family, and for how long.
+2. Whether observations and summaries are kept, restricted to non-clinical
+   topics, or turned off.
+3. What families are told about what is remembered.
+4. Who can read the store, and who reviews what accumulates in it.
+
+### The levers
+
+- `memoryExtractionEnabled: false` on the Conversation Configuration stops
+  observations and summaries. Identity resolution and traits are unaffected, so
+  a returning family is still recognized; they simply repeat their question.
+- Attaching a purpose-built operator to `intelligenceConfigurationIds`
+  constrains what is extracted, and is the option that keeps memory useful.
+  Whether it can be scoped tightly enough is unverified.
+- Removing what has accumulated is a data-plane call per observation.
+
+The content in the store was produced by test messages from a team member's own
+phone, so nothing sensitive has been retained. That is a property of who has
+messaged it so far, not of the configuration.
