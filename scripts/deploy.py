@@ -67,20 +67,42 @@ async def find_service(client: httpx.AsyncClient, name: str, owner_id: str | Non
     return exact[0]
 
 
+# Render's health check hits /healthz every five seconds, which is a dozen lines
+# a minute that say only that the service is up.
+HEALTH_CHECK_LINE = '"GET /healthz'
+
+
 async def recent_logs(
     client: httpx.AsyncClient, service_id: str, owner_id: str, limit: int
 ) -> list[dict]:
-    """The service's most recent log lines, newest last.
+    """The service's most recent log lines, oldest first.
 
     The only window onto a running deploy that this script has: an agent that
     answers without memory, or not at all, shows up here and nowhere else.
+
+    Health checks are dropped, and enough extra lines are fetched to cover what
+    that removes, so `--logs 50` spans the last fifty things that happened
+    rather than the last four minutes.
     """
     response = await client.get(
         f"{RENDER_API}/logs",
-        params={"ownerId": owner_id, "resource": service_id, "limit": limit},
+        params={
+            "ownerId": owner_id,
+            "resource": service_id,
+            # Without this, a recent deploy's build output crowds out everything
+            # the agent said.
+            "type": "app",
+            "limit": min(limit * 10, 1000),
+        },
     )
     response.raise_for_status()
-    return list(reversed(response.json().get("logs", [])))
+    lines = [
+        line
+        for line in response.json().get("logs", [])
+        if HEALTH_CHECK_LINE not in str(line.get("message", ""))
+    ]
+    # Render returns them oldest first, so the newest are at the end.
+    return lines[-limit:]
 
 
 async def latest_deploy(client: httpx.AsyncClient, service_id: str) -> dict | None:
