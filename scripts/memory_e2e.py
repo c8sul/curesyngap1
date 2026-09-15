@@ -30,21 +30,10 @@ from tac.adapters.options import AdapterOptions
 from tac.adapters.prompt_builder import MemoryPromptBuilder
 from tac.models.session import AuthorInfo, ConversationSession
 
+from app.memory import identifier_for
+
 PASS = "PASS"
 FAIL = "FAIL"
-
-
-def identifier_for(address: str) -> tuple[str, str]:
-    """The identifier a Memory Store profile is keyed on for this address.
-
-    A WhatsApp profile is keyed on the whole channel address, prefix included,
-    under idType `whatsapp`. An SMS number is keyed on the bare E.164 number
-    under `phone`. The same person on both channels therefore has two
-    identifiers, and looking one up does not find the other.
-    """
-    if address.startswith("whatsapp:"):
-        return "whatsapp", address
-    return "phone", address.split(":")[-1]
 
 
 def _content(entry: object) -> str:

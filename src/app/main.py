@@ -25,6 +25,7 @@ from tac.server import TACFastAPIServer
 
 from app.agent import Agent
 from app.config import TAC_REQUIRED_ENV, AgentSettings, missing_env
+from app.memory import resolve_profile_id
 from app.prompt import load_system_prompt
 from app.tools.escalation import EscalationContext, LoggingEscalation
 from app.tools.knowledge import FixtureKnowledgeSource, TwilioKnowledgeSource
@@ -116,6 +117,8 @@ def build_server() -> TACFastAPIServer:
         history = HISTORIES.setdefault(context.conversation_id, [])
         history.append({"role": "user", "content": message})
 
+        memory = await _recall(tac, context, message, settings.memory_mode)
+
         # `with_tac_memory` folds the caller's memory and profile into the
         # request, so the agent sees who it is talking to without this module
         # assembling that context itself.
@@ -138,17 +141,15 @@ def build_server() -> TACFastAPIServer:
     # WhatsApp sandbox needs no Meta verification, so WhatsApp alone is a
     # working setup while carrier registration for SMS is still pending.
     #
-    # `memory_mode` has to be passed: TAC defaults it to "never", which skips
-    # retrieval and hands the callback no memory at all, so a returning family
-    # is met as a stranger. "always" re-queries per message, using the message
-    # as the relevance query, which is what makes recall specific to what is
-    # being asked rather than to the conversation as a whole.
-    channel_config = {"memory_mode": settings.memory_mode}
+    # The channels keep TAC's default `memory_mode` of "never", so TAC does no
+    # retrieval of its own: `_recall` does it, because resolving a WhatsApp
+    # contact's profile needs an identifier type TAC does not derive. Leaving
+    # both on would spend a failing lookup on every message.
     channels: list[MessagingChannel] = []
     if (os.environ.get("TWILIO_PHONE_NUMBER") or "").strip().startswith("+"):
-        channels.append(SMSChannel(tac, channel_config))
+        channels.append(SMSChannel(tac))
     if os.environ.get("TWILIO_WHATSAPP_NUMBER"):
-        channels.append(WhatsAppChannel(tac, channel_config))
+        channels.append(WhatsAppChannel(tac))
 
     if not channels:
         raise RuntimeError(
@@ -158,6 +159,53 @@ def build_server() -> TACFastAPIServer:
     logger.info(f"Channels: {', '.join(channel.get_channel_name() for channel in channels)}")
 
     return TACFastAPIServer(tac=tac, messaging_channels=channels)
+
+
+async def _recall(
+    tac: TAC, context: ConversationSession, message: str, mode: str
+) -> TACMemoryResponse | None:
+    """What is remembered about this contact, or None if nothing can be.
+
+    The profile is resolved here rather than left to `tac.retrieve_memory`,
+    which cannot key a WhatsApp address to its profile. See `app.memory`.
+
+    `mode` of "never" turns recall off, which is the lever for a decision about
+    what may be retained about a family; see docs/decisions.md.
+
+    Recall failing is not worth failing a reply over: the agent answers from
+    the knowledge base either way, and the family repeats themselves at worst.
+    """
+    if mode == "never":
+        return None
+    try:
+        if not context.profile_id:
+            context.profile_id = await resolve_profile_id(
+                tac.conversation_memory_client,
+                context.author_info.address if context.author_info else None,
+            )
+        address = context.author_info.address if context.author_info else None
+        if not context.profile_id:
+            logger.info(f"Recall: no profile for {address}; answering without memory")
+            return None
+        memory = await tac.retrieve_memory(
+            context, query=message, conversation_id=context.conversation_id
+        )
+        # Logged at INFO because a family silently not being remembered is
+        # indistinguishable from the agent working correctly.
+        logger.info(
+            f"Recall: profile={context.profile_id} "
+            f"observations={len(getattr(memory, 'observations', None) or [])} "
+            f"summaries={len(getattr(memory, 'summaries', None) or [])} "
+            f"communications={len(getattr(memory, 'communications', None) or [])}"
+        )
+        return memory
+    except Exception:
+        logger.warning(
+            f"Recall failed for conversation {context.conversation_id}; "
+            "answering without memory",
+            exc_info=True,
+        )
+        return None
 
 
 def _transcript(history: list[dict[str, object]]) -> list[dict[str, str]]:

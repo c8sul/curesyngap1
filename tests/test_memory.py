@@ -1,12 +1,15 @@
 """How a contact address maps to a Memory Store identifier.
 
-`scripts/memory_e2e.py` checks the live round trip. This pins the one piece of
-that script with a rule worth stating in code, because getting it wrong looks
-like a returning family having no memory at all rather than like an error.
+Getting this wrong looks like a returning family having no memory at all rather
+than like an error, which is exactly how it presented: `tac.retrieve_memory`
+derives the type as email-or-phone, so it looked up a WhatsApp address under
+`phone` with the prefix attached, matched nothing, and reported no memory while
+observations accumulated in the store regardless.
 """
 
 import pytest
-from memory_e2e import identifier_for
+
+from app.memory import identifier_for
 
 
 @pytest.mark.parametrize(
@@ -15,6 +18,8 @@ from memory_e2e import identifier_for
         ("whatsapp:+13035550100", ("whatsapp", "whatsapp:+13035550100")),
         ("+13035550100", ("phone", "+13035550100")),
         ("sms:+13035550100", ("phone", "+13035550100")),
+        ("chat:user-1", ("chat", "chat:user-1")),
+        ("someone@example.org", ("email", "someone@example.org")),
     ],
 )
 def test_the_identifier_a_profile_is_keyed_on(address, expected):

@@ -353,6 +353,19 @@ Two gates remain before real families are on it:
 
 ## Known upstream issues
 
+**WhatsApp contacts cannot be resolved to a memory profile
+(`twilio-agent-connect` 2.4.0).** `tac.retrieve_memory()` resolves a profile
+itself when the session carries no `profile_id`, deriving the identifier type as
+`"email" if "@" in address else "phone"` and passing the address through
+unchanged (`tac/core/tac.py:180`). A WhatsApp address is `whatsapp:+1...` and
+its profile is keyed on identifier type `whatsapp` with the prefix intact, so
+the lookup matches nothing and a returning family is met as a stranger.
+
+`src/app/memory.py` works around it by resolving the profile and setting it on
+the session before retrieval, which is why the channels keep TAC's default
+`memory_mode` of `never`: retrieval happens in `_recall`, not in TAC. Report it
+upstream and delete `app.memory` when a fixed version is pinned.
+
 **`READ` delivery status fails validation (`twilio-agent-connect` 2.4.0).** Every
 WhatsApp read receipt logs a `ValidationError` for
 `recipients.0.deliveryStatus`. The SDK hardcodes

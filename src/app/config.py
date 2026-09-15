@@ -39,8 +39,9 @@ class AgentSettings:
             max_tool_iterations=int(os.environ.get("AGENT_MAX_TOOL_ITERATIONS", "3")),
             top_k=int(os.environ.get("KB_TOP_K", "5")),
             min_knowledge_score=float(os.environ.get("KB_MIN_SCORE", "0.3")),
-            # TAC defaults this to "never". "always" retrieves per message,
-            # "once" caches per conversation, "never" disables recall.
+            # "always" retrieves what is remembered on every message,
+            # "never" turns recall off. What may be retained about a family is
+            # an open decision; see docs/decisions.md.
             memory_mode=os.environ.get("MEMORY_MODE", "always"),
         )
 

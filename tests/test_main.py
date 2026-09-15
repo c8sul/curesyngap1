@@ -28,17 +28,45 @@ ENV = {
 
 
 @dataclass
+class FakeProfileLookup:
+    profiles: list
+
+
+@dataclass
+class FakeMemoryClient:
+    tac: "FakeTAC"
+
+    async def lookup_profile(self, id_type: str, value: str) -> FakeProfileLookup:
+        self.tac.lookups.append((id_type, value))
+        return FakeProfileLookup([self.tac.profile_id] if self.tac.profile_id else [])
+
+
+@dataclass
 class FakeTAC:
-    """Stands in for TAC, recording the callback it is given."""
+    """Stands in for TAC, recording the callback, lookups and recalls."""
 
     orchestrator_enabled: bool = True
     callback: Any = None
+    profile_id: str | None = "mem_profile_1"
+    recall_error: Exception | None = None
+    lookups: list = field(default_factory=list)
+    recalls: list = field(default_factory=list)
+
+    @property
+    def conversation_memory_client(self) -> FakeMemoryClient:
+        return FakeMemoryClient(self)
 
     def is_orchestrator_enabled(self) -> bool:
         return self.orchestrator_enabled
 
     def on_message_ready(self, callback: Any) -> None:
         self.callback = callback
+
+    async def retrieve_memory(self, context, query=None, conversation_id=None):
+        if self.recall_error:
+            raise self.recall_error
+        self.recalls.append((conversation_id, query))
+        return object()
 
 
 @dataclass
@@ -51,7 +79,6 @@ class FakeServer:
 @dataclass
 class FakeChannel:
     tac: object
-    config: dict | None = None
     name: str = "STUB"
 
     def get_channel_name(self) -> str:
@@ -67,6 +94,7 @@ class FakeAuthor:
 class FakeSession:
     conversation_id: str = "conv_conversation_1"
     channel: str = "WHATSAPP"
+    profile_id: str | None = None
     author_info: FakeAuthor | None = field(default_factory=lambda: FakeAuthor("whatsapp:+15550100"))
 
 
@@ -89,10 +117,8 @@ def wired(monkeypatch):
     monkeypatch.setattr(main.TACConfig, "from_env", classmethod(lambda cls: object()))
     monkeypatch.setattr(main, "AsyncOpenAI", lambda: client)
     monkeypatch.setattr(main, "TACFastAPIServer", FakeServer)
-    monkeypatch.setattr(main, "SMSChannel", lambda tac, config: FakeChannel(tac, config, "SMS"))
-    monkeypatch.setattr(
-        main, "WhatsAppChannel", lambda tac, config: FakeChannel(tac, config, "WHATSAPP")
-    )
+    monkeypatch.setattr(main, "SMSChannel", lambda tac: FakeChannel(tac, "SMS"))
+    monkeypatch.setattr(main, "WhatsAppChannel", lambda tac: FakeChannel(tac, "WHATSAPP"))
     monkeypatch.setattr(main, "with_tac_memory", lambda client, memory, context: client)
     monkeypatch.setattr(main, "HISTORIES", {})
     return tac, client
@@ -155,29 +181,56 @@ def test_a_phone_number_that_is_not_e164_registers_no_sms_channel(monkeypatch, w
     assert [channel.name for channel in server.messaging_channels] == ["WHATSAPP"]
 
 
-def test_every_channel_is_told_to_retrieve_memory(monkeypatch, wired):
-    """TAC defaults `memory_mode` to "never", which skips retrieval and hands
-    the callback no memory, so a returning family is met as a stranger. The
-    channels have to be constructed with it."""
-    monkeypatch.setenv("TWILIO_PHONE_NUMBER", "+15550100")
+async def test_what_is_remembered_reaches_the_model(wired):
+    """`tac.retrieve_memory` cannot key a WhatsApp address to its profile, so
+    the profile is resolved here and set on the session before recall."""
+    tac, client = wired
+    client.turns = [FakeMessage(content="ok")]
+    main.build_server()
+    session = FakeSession()
 
-    server = main.build_server()
+    await tac.callback("hi", session, None)
 
-    assert [channel.config["memory_mode"] for channel in server.messaging_channels] == [
-        "always",
-        "always",
-    ]
-
-
-def test_the_memory_mode_can_be_overridden(monkeypatch, wired):
-    monkeypatch.setenv("MEMORY_MODE", "once")
-
-    server = main.build_server()
-
-    assert server.messaging_channels[0].config["memory_mode"] == "once"
+    assert tac.lookups == [("whatsapp", "whatsapp:+15550100")]
+    assert session.profile_id == "mem_profile_1"
+    assert tac.recalls == [("conv_conversation_1", "hi")]
 
 
-# --- knowledge source selection ---
+async def test_recall_is_skipped_for_a_contact_with_no_profile(wired):
+    """A contact has no profile until their first message is processed."""
+    tac, client = wired
+    tac.profile_id = None
+    client.turns = [FakeMessage(content="ok")]
+    main.build_server()
+
+    assert await tac.callback("hi", FakeSession(), None) == "ok"
+    assert tac.recalls == []
+
+
+async def test_recall_can_be_turned_off(monkeypatch, wired):
+    """MEMORY_MODE=never is the lever for a retention decision, so it has to
+    stop retrieval without stopping the agent answering."""
+    tac, client = wired
+    monkeypatch.setenv("MEMORY_MODE", "never")
+    client.turns = [FakeMessage(content="ok")]
+    main.build_server()
+
+    assert await tac.callback("hi", FakeSession(), None) == "ok"
+    assert tac.lookups == []
+    assert tac.recalls == []
+
+
+async def test_a_reply_still_goes_out_when_recall_fails(wired):
+    """A family gets a knowledge-base answer whether or not memory works."""
+    tac, client = wired
+    tac.recall_error = RuntimeError("memory is down")
+    client.turns = [FakeMessage(content="ok")]
+    main.build_server()
+
+    assert await tac.callback("hi", FakeSession(), None) == "ok"
+
+
+# --- knowledge source selection ---# --- knowledge source selection ---
 
 
 def test_the_fixture_is_used_when_no_knowledge_base_is_configured(wired):
