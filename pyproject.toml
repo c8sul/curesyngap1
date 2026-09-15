@@ -25,7 +25,7 @@ packages = ["src/app"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-pythonpath = ["src", "tests"]
+pythonpath = ["src", "tests", "scripts"]
 testpaths = ["tests"]
 
 [tool.ruff]
