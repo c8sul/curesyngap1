@@ -69,7 +69,7 @@ Selected: single system prompt built around a mission statement, a routing taxon
    - DO NOT: interpret symptoms, diagnose, recommend or adjust treatment, comment on specific medications, interpret test results.
 4. **Safety rules** — the 9 rules from the current `system.md` kept as a numbered block, minor wording tightening only. These are the hard contract.
 5. **Routing taxonomy** — 7 categories with a one-line response pattern each (see Section 3).
-6. **Response format** — SMS soft cap 320 chars, hard max 480. Always include one link from `<sources>` when available. No emojis. No markdown. Optionally one clarifying question or CTA at the end when it helps routing (e.g., "Are you looking for a US or international specialist?").
+6. **Response format** — SMS soft cap 320 chars, hard max 480. When category is 1–5, always include one link from `<sources>` if available. No emojis. No markdown. Optionally one clarifying question or CTA at the end when it helps routing (e.g., "Are you looking for a US or international specialist?"). **Precedence: emergency (7) and clinical-refusal (6) templates override all format rules. Emergency responses NEVER include links, even when `<sources>` is populated.**
 7. **Context you may receive** — retrieved KB chunks arrive before the user turn wrapped as `<sources><source url="...">chunk</source></sources>`. Treat them as authoritative substrate. Cite the URL provided; never fabricate a URL. Language is stack-agnostic — TAC and a Node integration both fit.
 8. **Refusal patterns** — reference `refusal-templates.md`; inline the four canned openers.
 9. **When unsure** — restatement of Rule 6 with a concrete script: "I don't know — the best next step is to contact CURE SYNGAP1 directly: info@cureSYNGAP1.org."
@@ -123,7 +123,7 @@ Then optionally: link Medical Considerations doc + `/doctors/`.
 > "If this is a medical emergency, call 911 (US) or your local emergency number now."
 
 **5b-alt. Emergency — self-harm** (category 7, self-harm language, suicidal ideation):
-> "If you're in crisis, call or text 988 (US Suicide & Crisis Lifeline) or your local crisis line now. You are not alone."
+> "If you're in crisis, call or text 988 (US Suicide & Crisis Lifeline) or your local crisis line now."
 
 Emergency responses contain the template line ONLY. No links, no secondary content, no CTA. Do NOT bury the emergency line under any preamble. Model picks 5b or 5b-alt based on which signal is present; if both present, emit both.
 
@@ -155,23 +155,26 @@ Never invent, never guess a URL. Only cite URLs that appear in `<sources>`.
 }
 ```
 
-Coverage (~20 cases total):
+Coverage (~24 cases total):
 
 - 3× **info** — basic overview, epilepsy, life expectancy
 - 3× **care navigation** — doctor, registry, active clinical trial
 - 2× **donation / fundraise**
-- 2× **emotional support** — newly diagnosed, adult transition
+- 3× **emotional support** — newly diagnosed, adult transition, adult self-advocate first-person
 - 4× **clinical refusal** — seizure meds Q, ketogenic diet Q, dosage Q, symptom interpretation
-- 2× **emergency** — active seizure described in real-time, self-harm hint
+- 4× **emergency + boundary cases** — active seizure described in real-time, self-harm hint, retroactive "seizure yesterday" (must classify as clinical-refusal 6, NOT emergency), mild resolved symptom mention (must classify as info/care-nav, NOT emergency)
 - 2× **KB miss** — question genuinely outside corpus, hallucinatable question
 - 2× **off-topic / abusive**
+- 1× **envelope resilience** — assistant response body legitimately contains a `---` sequence (e.g., dashed list); parser must not misfire
 
 Assertion spec (`prompts/evals/README.md`):
 
 - `must_contain` — substrings that MUST appear in the SMS body (URLs from `sources`, refusal phrases like "911", "can't give medical advice").
 - `must_not_contain` — forbidden substrings (invented URLs, diagnostic language, dosage advice).
 - `max_chars` — SMS body length cap. Hard max 480.
-- `expected_meta` — required META field values. Partial match; only listed fields are asserted.
+- `expected_meta` — required META field values. Exact match on every field listed in the fixture; runner permits the model's META object to contain additional unlisted fields without failure. To assert a field is NOT set to a specific value, list it explicitly (e.g., `"needs_human": false`). Runner MUST fail if any listed field is missing or differs.
+- `forbidden_meta` — optional. Field values that MUST NOT appear (e.g., `{"needs_human": true}` on an info fixture to catch over-flagging).
+- `topics_allowed` — optional. If present, `META.topics` list must be a subset of this array. If absent, `topics` is not asserted.
 - `category_check` — flag for human review when a category is subjective (e.g., is "we're overwhelmed" emotional support or clinical redirect?).
 
 Runner is a follow-up PR. Fixtures are stack-agnostic JSONL — any language can parse them.
@@ -199,16 +202,21 @@ SMS: Thanks for asking about fundraising! We'd love your help — see https://cu
 **META fields:**
 
 - `category` — one of `info | donation | fundraising | care_nav | emotional | clinical_refusal | emergency | off_topic | kb_miss`.
-- `needs_human` — boolean. Set true when: emotional-support turn with distress escalation; clinical follow-up beyond a simple redirect; KB miss on a caregiver-critical question; explicit user request for a human.
-- `topics` — free-form list from a controlled vocab (starter set: `fundraising`, `global_impact_week`, `doctors`, `registry`, `EMERALD_trial`, `DEEp_OCEAN_trial`, `CAMP4_trial`, `ICD10`, `donation`, `newly_diagnosed`, `adult_transition`, `siblings`, `advocacy`, `financial_planning`). Enumerated in `prompts/README.md`; can grow over time.
+- `needs_human` — boolean. Set true ONLY when one of the enumerated triggers fires:
+  - Emotional-support turn contains explicit distress escalation (crisis language, hopelessness, isolation-plus-request-for-help).
+  - Clinical turn where the user has explicitly stated they cannot reach their clinician AND is asking for immediate care direction (not just information).
+  - KB miss on a topic the caregiver community identifies as high-value (initial trigger set: doctors, registry, active clinical trial enrollment, financial planning, adult transition).
+  - Explicit user request for a human ("can I talk to someone", "connect me with a person").
+  Set false in all other cases, including routine clinical refusals that redirect to the user's own neurologist without additional signals.
+- `topics` — list. Values MUST come from the enumerated controlled vocab in `prompts/README.md` (starter set: `fundraising`, `global_impact_week`, `doctors`, `registry`, `EMERALD_trial`, `DEEp_OCEAN_trial`, `CAMP4_trial`, `ICD10`, `donation`, `newly_diagnosed`, `adult_transition`, `siblings`, `advocacy`, `financial_planning`, `self_advocate`). Any unknown intent MUST be tagged `other` — the model MUST NOT invent new values. Envelope-parse layer validates topics against the vocab; unknown values downgrade to `other` in the logged META and emit a parse-warning event so the vocab can be extended intentionally.
 - `kb_hit` — boolean. True if response cites a URL from `<sources>`. False if fallback / refusal-only.
 
 **Parsing contract** (documented in `prompts/README.md`):
 
-- Split on the line containing only `---`.
-- Text before the separator: strip leading `META: `, parse the remainder as JSON.
+- Separator is a line whose content is exactly `---` — no leading whitespace, no trailing whitespace, no other characters. Multiline SMS bodies MAY contain `-`, `--`, or dashes with surrounding text without triggering split. Only one separator is expected per response; the FIRST fully-matching separator line splits META from SMS. Any subsequent `---` lines are part of the SMS body and shipped verbatim.
+- Text before the separator: strip leading `META: `, parse the remainder as JSON. If JSON parse fails, envelope is malformed.
 - Text after the separator: strip leading `SMS: `. This is the message body sent to Twilio.
-- **Degrade gracefully:** if the envelope is missing or malformed, log a parse-failure warning and send the raw model output as the SMS body. Never drop a message due to envelope failure.
+- **Degrade gracefully:** if the envelope is missing or malformed (no separator found, JSON invalid, required fields missing), log a parse-failure warning event and send the raw model output as the SMS body. Never drop a message due to envelope failure. Parse-failure rate is a monitored metric.
 
 **Enables (all v2, none in this PR):**
 
