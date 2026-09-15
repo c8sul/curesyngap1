@@ -1,7 +1,8 @@
 """Trigger and watch a deploy of the Render service.
 
     docker compose run --rm deploy            # deploy and wait
-    docker compose run --rm deploy --status   # report, change nothing
+    docker compose run --rm deploy --status    # report, change nothing
+    docker compose run --rm deploy --logs 50   # the service's recent output
 
 Render deploys on push once the repository is connected, so this exists for the
 cases that push does not cover: redeploying after an environment variable
@@ -64,6 +65,22 @@ async def find_service(client: httpx.AsyncClient, name: str, owner_id: str | Non
             "Render's Blueprints first; see the README."
         )
     return exact[0]
+
+
+async def recent_logs(
+    client: httpx.AsyncClient, service_id: str, owner_id: str, limit: int
+) -> list[dict]:
+    """The service's most recent log lines, newest last.
+
+    The only window onto a running deploy that this script has: an agent that
+    answers without memory, or not at all, shows up here and nowhere else.
+    """
+    response = await client.get(
+        f"{RENDER_API}/logs",
+        params={"ownerId": owner_id, "resource": service_id, "limit": limit},
+    )
+    response.raise_for_status()
+    return list(reversed(response.json().get("logs", [])))
 
 
 async def latest_deploy(client: httpx.AsyncClient, service_id: str) -> dict | None:
@@ -139,6 +156,12 @@ async def main() -> int:
         action="store_true",
         help="Report the service and its last deploy without starting one.",
     )
+    parser.add_argument(
+        "--logs",
+        type=int,
+        metavar="N",
+        help="Print the last N log lines and exit, starting no deploy.",
+    )
     args = parser.parse_args()
 
     api_key = os.environ.get("RENDER_API_KEY")
@@ -158,6 +181,16 @@ async def main() -> int:
         print(f"  url: {describe(service)}")
         print(f"  health: {describe(service)}/healthz")
 
+        if args.logs:
+            if not args.owner:
+                raise DeployError(
+                    "Reading logs needs a workspace id. Set RENDER_OWNER_ID in .env or "
+                    "pass --owner."
+                )
+            for line in await recent_logs(client, service_id, args.owner, args.logs):
+                print(f"  {line.get('timestamp', '')} {line.get('message', '')}")
+            return 0
+
         if args.status:
             deploy = await latest_deploy(client, service_id)
             if not deploy:
@@ -175,8 +208,8 @@ async def main() -> int:
         status = str(final.get("status") or "")
         if status not in SUCCESS_STATUSES:
             raise DeployError(
-                f"Deploy {deploy_id} ended {status!r}. The build and runtime logs are in "
-                "the Render dashboard; the API does not serve them."
+                f"Deploy {deploy_id} ended {status!r}. Run with --logs to see what the "
+                "service said, or open the build log in the Render dashboard."
             )
         print(f"Live at {describe(service)}")
         print(
