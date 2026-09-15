@@ -15,6 +15,10 @@ dev = [
     "pytest-asyncio==1.4.0",
     "ruff==0.16.7",
 ]
+# Reading render.yaml in scripts/deploy.py. Not needed to serve a message.
+deploy = [
+    "pyyaml==6.0.5",
+]
 
 [build-system]
 requires = ["hatchling"]
