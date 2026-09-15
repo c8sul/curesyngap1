@@ -13,7 +13,7 @@ from tac.core.logging import get_logger
 from tac.tools.base import TACTool
 
 from app.config import AgentSettings
-from app.prompt import FALLBACK_REPLY
+from app.prompt import FALLBACK_REPLY, MAX_REPLY_CHARS, TOO_LONG_REPLY
 from app.tools.escalation import Escalation, EscalationContext, build_escalation_tool
 from app.tools.knowledge import KnowledgeSource, build_knowledge_tool
 
@@ -66,6 +66,8 @@ class Agent:
         per-conversation memory-injecting wrapper is supplied.
 
         Returns the reply text, or a fallback if the model errors or times out.
+        A reply longer than `MAX_REPLY_CHARS` is replaced with `TOO_LONG_REPLY`,
+        because the channel would drop it without telling anyone.
         """
         turn = list(history)
         try:
@@ -85,6 +87,18 @@ class Agent:
                 exc_info=True,
             )
             return FALLBACK_REPLY
+
+        if len(reply) > MAX_REPLY_CHARS:
+            logger.warning(
+                f"Reply of {len(reply)} characters exceeds {MAX_REPLY_CHARS} on "
+                f"conversation {escalation_context.conversation_id}; sending the "
+                "too-long reply instead"
+            )
+            reply = TOO_LONG_REPLY
+            # Record what the family was actually sent, so the model does not
+            # carry on from an answer they never saw.
+            turn[-1] = {"role": "assistant", "content": reply}
+
         history[:] = turn
         return reply
 

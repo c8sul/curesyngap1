@@ -10,6 +10,20 @@ FALLBACK_REPLY = (
     "or find what you need at https://curesyngap1.org/"
 )
 
+# Twilio rejects a WhatsApp or SMS body over 1600 characters, and it does so
+# after accepting the send, so nothing reports the failure back and the family
+# simply gets no reply. Staying under the limit with room to spare is the only
+# way to guarantee they hear something.
+MAX_REPLY_CHARS = 1500
+
+# Sent in place of a reply too long to deliver. Worded for either cause: an
+# off-topic request the model complied with, or an on-topic answer that ran long.
+TOO_LONG_REPLY = (
+    "Sorry, I can't help with that here. I can answer short questions about "
+    "SYNGAP1 and CURE SYNGAP1. Please try a more specific question, or visit "
+    "https://curesyngap1.org/"
+)
+
 
 def load_system_prompt(path: Path | None = None) -> str:
     """Read the system prompt.

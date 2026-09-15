@@ -367,6 +367,7 @@ Symptoms seen while getting this working end to end, and what each one means.
 | The user gets "You said ..." alongside the real answer | The WhatsApp Sandbox Inbound URL is still the stock Twilio Function every new sandbox ships with. Point it at `<host>/whatsapp-sandbox-silence`. |
 | Two replies to one message | A local container and the deployed service are both serving the same Conversation Configuration. Only one webhook host can be current. |
 | A corrected credential changes nothing | Render keeps the running instance until something deploys. Run `docker compose run --rm deploy`. |
+| A message gets no reply at all, but the logs show `Sent WHATSAPP response` | The body was over Twilio's 1600-character limit, which Twilio rejects after accepting the send; the Console's Messaging logs show the failure. `Agent.respond()` now replaces any reply over `MAX_REPLY_CHARS` with a short one and logs a warning, so look for that line first. |
 | `GET /` returns 404 | Expected. The app registers `/webhook`, `/twiml`, `/ws`, `/healthz` and the sandbox silencer, and no root route. Use `/healthz`. |
 | The first message is slow or returns the fallback | The free instance spun down. See [The free plan sleeps](#the-free-plan-sleeps). |
 | The agent says it has no memory of earlier conversations | Look for a `Recall:` line in the logs. `observations=0` means retrieval found nothing; no line at all means recall was skipped or the contact has no profile yet. |

@@ -6,7 +6,7 @@ from fakes import FakeMessage, FakeOpenAI, tool_call
 
 from app.agent import Agent
 from app.config import AgentSettings
-from app.prompt import FALLBACK_REPLY
+from app.prompt import FALLBACK_REPLY, MAX_REPLY_CHARS, TOO_LONG_REPLY
 from app.tools.escalation import EscalationContext, LoggingEscalation
 from app.tools.knowledge import FixtureKnowledgeSource
 
@@ -295,3 +295,30 @@ async def test_a_successful_turn_commits_its_tool_calls_to_history():
 
     assert [entry["role"] for entry in history] == ["user", "assistant", "tool", "assistant"]
     assert history[2]["tool_call_id"] == "call_1"
+
+
+async def test_a_reply_too_long_to_deliver_is_replaced():
+    """Twilio drops an oversized body after accepting it, so the family would
+    get nothing at all. They get a short reply instead."""
+    essay = "Grocery shopping is a weekly ritual. " * 60
+    assert len(essay) > MAX_REPLY_CHARS
+    history = [{"role": "user", "content": "Write a 300 word essay about grocery shopping"}]
+
+    reply = await build(FakeOpenAI(turns=[FakeMessage(content=essay)])).respond(
+        history, context()
+    )
+
+    assert reply == TOO_LONG_REPLY
+    assert len(reply) <= MAX_REPLY_CHARS
+    # History holds what was sent, not the essay the family never saw.
+    assert history[-1] == {"role": "assistant", "content": TOO_LONG_REPLY}
+
+
+async def test_a_reply_at_the_limit_is_sent_unchanged():
+    reply_text = "x" * MAX_REPLY_CHARS
+
+    reply = await build(FakeOpenAI(turns=[FakeMessage(content=reply_text)])).respond(
+        [{"role": "user", "content": "hi"}], context()
+    )
+
+    assert reply == reply_text
