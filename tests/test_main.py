@@ -234,7 +234,7 @@ async def test_a_reply_still_goes_out_when_recall_fails(wired):
     assert await tac.callback("hi", FakeSession(), None) == "ok"
 
 
-# --- knowledge source selection ---# --- knowledge source selection ---
+# --- knowledge source selection ---
 
 
 def test_the_fixture_is_used_when_no_knowledge_base_is_configured(wired):
@@ -304,15 +304,123 @@ async def test_history_is_kept_per_conversation(wired):
     assert [entry["content"] for entry in main.HISTORIES["conv_b"]] == ["two", "second"]
 
 
-async def test_history_is_capped_so_a_long_conversation_cannot_grow_without_bound(wired):
+async def test_history_is_capped_so_a_long_conversation_cannot_grow_without_bound(
+    monkeypatch, wired
+):
     tac, client = wired
     client.turns = [FakeMessage(content=f"reply {index}") for index in range(40)]
+    # A conversation this long is what the rate limiter exists to stop; this
+    # test is about the history cap, so lift it.
+    monkeypatch.setattr(main, "RATE_LIMIT_MESSAGES", 100)
     main.build_server()
 
     for index in range(40):
         await tac.callback(f"message {index}", FakeSession(), None)
 
     assert len(main.HISTORIES["conv_conversation_1"]) == main.MAX_HISTORY_MESSAGES
+
+
+async def test_conversations_are_capped_so_the_process_cannot_leak(monkeypatch, wired):
+    """Nothing tells this module a conversation closed, so the oldest ones are
+    dropped rather than kept forever."""
+    tac, client = wired
+    monkeypatch.setattr(main, "MAX_CONVERSATIONS", 3)
+    client.turns = [FakeMessage(content="ok") for _ in range(5)]
+    main.build_server()
+
+    for index in range(5):
+        await tac.callback("hi", FakeSession(conversation_id=f"conv_{index}"), None)
+
+    assert list(main.HISTORIES) == ["conv_2", "conv_3", "conv_4"]
+
+
+async def test_an_active_conversation_is_not_dropped_for_being_old(monkeypatch, wired):
+    """The cap is least-recently-used, so a family still messaging keeps their
+    history however long the conversation has been open."""
+    tac, client = wired
+    monkeypatch.setattr(main, "MAX_CONVERSATIONS", 2)
+    client.turns = [FakeMessage(content="ok") for _ in range(4)]
+    main.build_server()
+
+    await tac.callback("hi", FakeSession(conversation_id="conv_old"), None)
+    await tac.callback("hi", FakeSession(conversation_id="conv_other"), None)
+    await tac.callback("still here", FakeSession(conversation_id="conv_old"), None)
+    await tac.callback("hi", FakeSession(conversation_id="conv_new"), None)
+
+    assert list(main.HISTORIES) == ["conv_old", "conv_new"]
+
+
+async def test_an_overlong_message_is_truncated_before_it_reaches_the_model(monkeypatch, wired):
+    tac, client = wired
+    monkeypatch.setattr(main, "MAX_INBOUND_CHARS", 50)
+    client.turns = [FakeMessage(content="ok")]
+    main.build_server()
+
+    await tac.callback("x" * 500, FakeSession(), None)
+
+    sent = client.calls[0]["messages"][-1]["content"]
+    assert sent == "x" * 50
+
+
+async def test_a_contact_over_the_rate_limit_is_told_once_then_not_answered(wired):
+    """One sender cannot spend an OpenAI call per message, and answering every
+    message over the limit would just as happily answer a loop."""
+    tac, client = wired
+    client.turns = [FakeMessage(content="ok") for _ in range(main.RATE_LIMIT_MESSAGES)]
+    main.build_server()
+    session = FakeSession()
+
+    replies = [
+        await tac.callback(f"message {index}", session, None)
+        for index in range(main.RATE_LIMIT_MESSAGES + 3)
+    ]
+
+    assert replies[: main.RATE_LIMIT_MESSAGES] == ["ok"] * main.RATE_LIMIT_MESSAGES
+    assert replies[main.RATE_LIMIT_MESSAGES] == main.RATE_LIMITED_REPLY
+    # None tells TAC to send nothing at all.
+    assert replies[main.RATE_LIMIT_MESSAGES + 1 :] == [None, None]
+    assert len(client.calls) == main.RATE_LIMIT_MESSAGES
+
+
+async def test_one_contact_over_the_limit_does_not_silence_another(wired):
+    tac, client = wired
+    client.turns = [FakeMessage(content="ok") for _ in range(main.RATE_LIMIT_MESSAGES + 1)]
+    main.build_server()
+
+    for index in range(main.RATE_LIMIT_MESSAGES + 2):
+        await tac.callback(
+            f"message {index}",
+            FakeSession(author_info=FakeAuthor("whatsapp:+15550100")),
+            None,
+        )
+    reply = await tac.callback(
+        "hi", FakeSession(author_info=FakeAuthor("whatsapp:+15550199")), None
+    )
+
+    assert reply == "ok"
+
+
+def test_the_rate_limit_window_rolls():
+    limiter = main.RateLimiter(limit=2, window_seconds=60.0)
+
+    assert [limiter.check("a", now=0.0) for _ in range(4)] == [
+        main.Allowance.OK,
+        main.Allowance.OK,
+        main.Allowance.JUST_OVER_LIMIT,
+        main.Allowance.OVER_LIMIT,
+    ]
+    assert limiter.check("a", now=61.0) is main.Allowance.OK
+
+
+def test_the_rate_limiter_forgets_contacts_whose_window_has_rolled():
+    """Its own bookkeeping must not become the leak it was added to prevent."""
+    limiter = main.RateLimiter(limit=2, window_seconds=60.0)
+
+    for index in range(100):
+        limiter.check(f"contact_{index}", now=0.0)
+    limiter.check("later", now=61.0)
+
+    assert list(limiter._counts) == ["later"]
 
 
 async def test_a_conversation_with_no_author_survives_a_missing_address(wired):

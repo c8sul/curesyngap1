@@ -10,6 +10,8 @@ This module owns one thing: turning a ready message into a reply.
 
 import os
 import sys
+import time
+from enum import Enum
 
 from dotenv import load_dotenv
 from fastapi import Response
@@ -22,11 +24,12 @@ from tac.channels.whatsapp import WhatsAppChannel
 from tac.models.session import ConversationSession
 from tac.models.tac import TACMemoryResponse
 from tac.server import TACFastAPIServer
+from tac.utils.redaction import mask_address
 
 from app.agent import Agent
 from app.config import TAC_REQUIRED_ENV, AgentSettings, missing_env
 from app.memory import resolve_profile_id
-from app.prompt import load_system_prompt
+from app.prompt import RATE_LIMITED_REPLY, load_system_prompt
 from app.tools.escalation import EscalationContext, LoggingEscalation
 from app.tools.knowledge import FixtureKnowledgeSource, TwilioKnowledgeSource
 
@@ -36,12 +39,89 @@ logger = get_logger(__name__)
 # Conversation history per conversation, in OpenAI message form. In-process, so
 # it is lost on restart and not shared between replicas; TAC's Conversation
 # Memory is what carries context across sessions.
+#
+# Nothing here is ever deleted on its own: TAC removes its own session when a
+# conversation closes, and this module never hears about it. So the number of
+# conversations is capped as well as the length of each, least recently used
+# first, which bounds the process rather than leaving a slow leak that only a
+# restart clears.
 HISTORIES: dict[str, list[dict[str, object]]] = {}
 MAX_HISTORY_MESSAGES = 40
+MAX_CONVERSATIONS = 500
+
+# Whatever a family sends is what the model reads. A very long message costs
+# tokens on a nonprofit's budget and is where an injection attempt would hide,
+# and no real question needs this much room.
+MAX_INBOUND_CHARS = 2000
+
+# One contact's messages per window. Above it the agent stops answering rather
+# than spending an OpenAI call per message; a family typing quickly stays well
+# under it.
+RATE_LIMIT_MESSAGES = 12
+RATE_LIMIT_WINDOW_SECONDS = 60.0
 
 
 # Empty TwiML: a well-formed reply that sends the user nothing.
 SILENT_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
+
+
+class Allowance(Enum):
+    """What the rate limiter says about one message."""
+
+    OK = "ok"
+    # The message that crosses the limit: answered once, with the canned reply.
+    JUST_OVER_LIMIT = "just_over_limit"
+    # Every message after that, until the window rolls: not answered at all.
+    OVER_LIMIT = "over_limit"
+
+
+class RateLimiter:
+    """A fixed window of messages per contact.
+
+    In-process, so it is per replica and lost on restart. That is enough for
+    what it is for: stopping one sender, looping or not, from spending an
+    OpenAI call per message on a nonprofit's budget. It is not a security
+    control, and a determined sender across replicas is not what it stops.
+    """
+
+    def __init__(self, limit: int, window_seconds: float) -> None:
+        self._limit = limit
+        self._window = window_seconds
+        self._counts: dict[str, tuple[float, int]] = {}
+
+    def check(self, key: str, now: float | None = None) -> Allowance:
+        """Count one message from `key` and say whether to answer it."""
+        now = time.monotonic() if now is None else now
+        self._forget_stale_windows(now)
+
+        started, count = self._counts.get(key, (now, 0))
+        if now - started >= self._window:
+            started, count = now, 0
+        count += 1
+        self._counts[key] = (started, count)
+
+        if count <= self._limit:
+            return Allowance.OK
+        return Allowance.JUST_OVER_LIMIT if count == self._limit + 1 else Allowance.OVER_LIMIT
+
+    def _forget_stale_windows(self, now: float) -> None:
+        """Drop contacts whose window has rolled, so this cannot grow forever."""
+        for key, (started, _) in list(self._counts.items()):
+            if now - started >= self._window:
+                del self._counts[key]
+
+
+def _history_for(conversation_id: str) -> list[dict[str, object]]:
+    """This conversation's history, kept as one of the most recent ones.
+
+    Re-inserting on every message makes `HISTORIES` ordered least recently used
+    first, so the oldest conversations are the ones dropped at the cap.
+    """
+    history = HISTORIES.pop(conversation_id, [])
+    HISTORIES[conversation_id] = history
+    while len(HISTORIES) > MAX_CONVERSATIONS:
+        HISTORIES.pop(next(iter(HISTORIES)))
+    return history
 
 
 def create_app() -> object:
@@ -117,12 +197,44 @@ def build_server() -> TACFastAPIServer:
         settings=settings,
     )
 
+    rate_limiter = RateLimiter(RATE_LIMIT_MESSAGES, RATE_LIMIT_WINDOW_SECONDS)
+
     async def handle_message_ready(
         message: str,
         context: ConversationSession,
         memory: TACMemoryResponse | None,
-    ) -> str:
-        history = HISTORIES.setdefault(context.conversation_id, [])
+    ) -> str | None:
+        """The reply to send, or None to send nothing.
+
+        TAC sends whatever this returns and sends nothing for None, which is
+        what keeps a contact over the rate limit from being answered message
+        for message.
+        """
+        address = context.author_info.address if context.author_info else None
+        allowance = rate_limiter.check(address or context.conversation_id)
+        if allowance is Allowance.OVER_LIMIT:
+            logger.warning(
+                f"Rate limit: {mask_address(address)} is over "
+                f"{RATE_LIMIT_MESSAGES} messages per "
+                f"{int(RATE_LIMIT_WINDOW_SECONDS)}s; not answering"
+            )
+            return None
+        if allowance is Allowance.JUST_OVER_LIMIT:
+            logger.warning(
+                f"Rate limit: {mask_address(address)} reached "
+                f"{RATE_LIMIT_MESSAGES} messages per "
+                f"{int(RATE_LIMIT_WINDOW_SECONDS)}s; telling them to wait"
+            )
+            return RATE_LIMITED_REPLY
+
+        if len(message) > MAX_INBOUND_CHARS:
+            logger.info(
+                f"Inbound message of {len(message)} characters truncated to "
+                f"{MAX_INBOUND_CHARS} on conversation {context.conversation_id}"
+            )
+            message = message[:MAX_INBOUND_CHARS]
+
+        history = _history_for(context.conversation_id)
         history.append({"role": "user", "content": message})
 
         memory = await _recall(tac, context, message, settings.memory_mode)

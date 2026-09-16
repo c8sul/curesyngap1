@@ -35,7 +35,10 @@ class AgentSettings:
             # reasoning is off. Set it empty to omit the parameter for a model
             # that does not accept it.
             reasoning_effort=os.environ.get("AGENT_REASONING_EFFORT", "none") or None,
-            timeout_seconds=float(os.environ.get("AGENT_TIMEOUT_SECONDS", "12")),
+            # TAC handles each webhook in a background task, so Twilio is not
+            # waiting on this and a short timeout buys nothing. It is what makes
+            # a cold start answer with the fallback instead of an answer.
+            timeout_seconds=float(os.environ.get("AGENT_TIMEOUT_SECONDS", "25")),
             max_tool_iterations=int(os.environ.get("AGENT_MAX_TOOL_ITERATIONS", "3")),
             top_k=int(os.environ.get("KB_TOP_K", "5")),
             min_knowledge_score=float(os.environ.get("KB_MIN_SCORE", "0.3")),

@@ -17,6 +17,17 @@ from tac.utils.redaction import mask_phone
 
 logger = get_logger(__name__)
 
+# How much of what a family wrote reaches a log line. A question can itself be
+# a health detail, and logs travel further than the developer who reads them.
+LOGGED_CHARS = 200
+
+
+def _clip(text: str, limit: int | None) -> str:
+    """`text`, shortened to `limit` characters and marked when it was cut."""
+    if limit is None or len(text) <= limit:
+        return text
+    return f"{text[:limit]}... [{len(text) - limit} more characters]"
+
 
 @dataclass(frozen=True)
 class EscalationRequest:
@@ -29,19 +40,27 @@ class EscalationRequest:
     contact_address: str | None = None
     transcript: list[dict[str, str]] = field(default_factory=list)
 
-    def render(self) -> str:
-        """Render the escalation as plain text for a human reader."""
+    def render(self, truncate_to: int | None = None) -> str:
+        """Render the escalation as plain text for a human reader.
+
+        `truncate_to` shortens every piece of what the family wrote. A question
+        can carry health details, so a destination that is not a person reading
+        it — a log line, above all — gets the gist rather than the whole thing.
+        """
         lines = [
             f"Channel: {self.channel}",
             f"Conversation: {self.conversation_id}",
             f"From: {mask_phone(self.contact_address) if self.contact_address else 'unknown'}",
             "",
-            f"Question: {self.question}",
-            f"Why the agent could not answer: {self.reason}",
+            f"Question: {_clip(self.question, truncate_to)}",
+            f"Why the agent could not answer: {_clip(self.reason, truncate_to)}",
         ]
         if self.transcript:
             lines += ["", "Conversation so far:"]
-            lines += [f"  {turn['role']}: {turn['content']}" for turn in self.transcript]
+            lines += [
+                f"  {turn['role']}: {_clip(turn['content'], truncate_to)}"
+                for turn in self.transcript
+            ]
         return "\n".join(lines)
 
 
@@ -64,7 +83,8 @@ class Escalation(Protocol):
 class LoggingEscalation:
     """Log the escalation and keep it in memory.
 
-    `sent` lets tests and the local chat harness assert on what was escalated.
+    `sent` lets tests and the local chat harness assert on what was escalated,
+    and holds the request whole; only the log line is clipped.
     """
 
     def __init__(self) -> None:
@@ -72,7 +92,9 @@ class LoggingEscalation:
 
     async def send(self, request: EscalationRequest) -> None:
         self.sent.append(request)
-        logger.warning(f"Escalating unanswered question\n{request.render()}")
+        logger.warning(
+            f"Escalating unanswered question\n{request.render(truncate_to=LOGGED_CHARS)}"
+        )
 
 
 def build_escalation_tool(escalation: Escalation, context: EscalationContext) -> TACTool:

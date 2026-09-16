@@ -61,7 +61,7 @@ services:
       - key: AGENT_REASONING_EFFORT
         value: none
       - key: AGENT_TIMEOUT_SECONDS
-        value: "12"
+        value: "25"
       - key: AGENT_MAX_TOOL_ITERATIONS
         value: "3"
       - key: KB_TOP_K
