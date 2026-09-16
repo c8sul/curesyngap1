@@ -1,8 +1,9 @@
 """The agent loop: retrieve, answer, escalate.
 
-One turn is `respond()`: give the model the conversation so far and two tools,
-let it call them, and return the text it settles on. The loop is capped and
-time-bounded so a messaging channel is never left waiting.
+One turn is `respond()`: give the model the conversation so far and the
+knowledge, escalation, and email follow-up tools, let it call them, and
+return the text it settles on. The loop is capped and time-bounded so a
+messaging channel is never left waiting.
 """
 
 import asyncio
@@ -14,7 +15,12 @@ from tac.tools.base import TACTool
 
 from app.config import AgentSettings
 from app.prompt import FALLBACK_REPLY, MAX_REPLY_CHARS, TOO_LONG_REPLY
-from app.tools.escalation import Escalation, EscalationContext, build_escalation_tool
+from app.tools.escalation import (
+    Escalation,
+    EscalationContext,
+    build_email_followup_tool,
+    build_escalation_tool,
+)
 from app.tools.knowledge import KnowledgeSource, build_knowledge_tool
 
 logger = get_logger(__name__)
@@ -113,6 +119,7 @@ class Agent:
             for tool in (
                 build_knowledge_tool(self._knowledge_source, top_k=self._settings.top_k),
                 build_escalation_tool(self._escalation, escalation_context),
+                build_email_followup_tool(self._escalation, escalation_context),
             )
         }
         schemas = [tool.to_openai_format() for tool in tools.values()]
