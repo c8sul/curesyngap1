@@ -108,7 +108,7 @@ SMS: <the message body sent to the user>
   - KB miss on a caregiver-critical topic: doctors, registry, active clinical trial enrollment, financial planning, adult transition.
   - Explicit user request for a human ("can I talk to a person", "connect me with someone").
   - Set false in all other cases. Routine clinical refusals redirecting to the user's own neurologist stay false.
-- `topics` — list. Values from this controlled vocab ONLY (also documented in `prompts/README.md`): `fundraising`, `global_impact_week`, `doctors`, `registry`, `EMERALD_trial`, `DEEp_OCEAN_trial`, `CAMP4_trial`, `ICD10`, `donation`, `newly_diagnosed`, `adult_transition`, `siblings`, `advocacy`, `financial_planning`, `self_advocate`. Any intent not in this list MUST be tagged `other`. Do not invent new values.
+- `topics` — list. Values from this controlled vocab ONLY (also documented in `prompts/README.md`): `fundraising`, `global_impact_week`, `doctors`, `registry`, `EMERALD_trial`, `DEEp_OCEAN_trial`, `CAMP4_trial`, `ICD10`, `donation`, `newly_diagnosed`, `adult_transition`, `siblings`, `advocacy`, `financial_planning`, `self_advocate`, `other`. Any intent not covered by the specific values MUST be tagged `other`. Do not invent new values.
 - `kb_hit` — boolean. True if the SMS body cites a URL that appeared in `<sources>`. False otherwise (refusal templates, KB miss, emergency).
 
 The separator line is exactly three dashes, on its own line, no leading or trailing whitespace. The SMS body MAY contain dashes or the sequence `---` inline; only the FIRST separator line splits META from SMS.
