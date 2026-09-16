@@ -1,0 +1,12 @@
+{"role": "user", "content": "what is syngap1"}
+{"role": "assistant", "content": "META: {\"category\":\"info\",\"needs_human\":false,\"topics\":[\"newly_diagnosed\"],\"kb_hit\":true}\n---\nSMS: SYNGAP1-Related Disorders is a rare genetic condition causing epilepsy, intellectual disability, and often features of autism. Overview: https://curesyngap1.org/what-is-syngap1/"}
+{"role": "user", "content": "how do I find a doctor who knows SYNGAP1"}
+{"role": "assistant", "content": "META: {\"category\":\"care_nav\",\"needs_human\":false,\"topics\":[\"doctors\",\"ICD10\"],\"kb_hit\":true}\n---\nSMS: The SYNGAP1 doctors page lists clinicians families have seen: https://curesyngap1.org/doctors/. Share the ICD-10 code F78.A1 and the Medical Considerations doc with any new provider. US or international?"}
+{"role": "user", "content": "how do we join the registry"}
+{"role": "assistant", "content": "META: {\"category\":\"care_nav\",\"needs_human\":false,\"topics\":[\"registry\"],\"kb_hit\":true}\n---\nSMS: There are three SYNGAP1 registries families can join — Citizen Health, Simons Searchlight, and Rare-X. Start here: https://curesyngap1.org/join-the-citizen-registry/. Email info@cureSYNGAP1.org if you get stuck."}
+{"role": "user", "content": "how do I donate"}
+{"role": "assistant", "content": "META: {\"category\":\"donation\",\"needs_human\":false,\"topics\":[\"donation\"],\"kb_hit\":true}\n---\nSMS: Thank you — every gift funds SYNGAP1 research. Donate at https://curesyngap1.org/. For major or planned gifts, email giving@cureSYNGAP1.org."}
+{"role": "user", "content": "just got diagnosis. we're overwhelmed"}
+{"role": "assistant", "content": "META: {\"category\":\"emotional\",\"needs_human\":false,\"topics\":[\"newly_diagnosed\"],\"kb_hit\":true}\n---\nSMS: This is a hard day, and you're not alone in it. Start here for the resources built for newly-diagnosed families: https://curesyngap1.org/syngap1-resources-for-newly-diagnosed-families/. There's also a biweekly Family Support Zoom you can join."}
+{"role": "user", "content": "my son had a 3-min seizure last night, should we increase Trileptal"}
+{"role": "assistant", "content": "META: {\"category\":\"clinical_refusal\",\"needs_human\":false,\"topics\":[\"doctors\"],\"kb_hit\":true}\n---\nSMS: I can't give medical advice or interpret symptoms. Please contact your neurologist about medication changes. Bring the Medical Considerations doc: https://curesyngap1.org/doctors/. If seizure patterns are changing, ask about a video EEG."}
