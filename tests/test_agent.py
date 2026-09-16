@@ -77,7 +77,7 @@ async def test_tools_are_offered_to_the_model():
     await build(client).respond([{"role": "user", "content": "hi"}], context())
 
     offered = {tool["function"]["name"] for tool in client.calls[0]["tools"]}
-    assert offered == {"search_knowledge", "escalate_to_team"}
+    assert offered == {"search_knowledge", "escalate_to_team", "request_email_followup"}
 
 
 async def test_reasoning_effort_is_sent_when_configured():
@@ -147,6 +147,43 @@ async def test_escalation_carries_the_conversation_details():
     assert "Denver" in request.render()
     # The rendered escalation masks the contact's number.
     assert "+15555550100" not in request.render()
+    # Plain escalation does not attach an email.
+    assert request.family_email is None
+    assert "Reply to:" not in request.render()
+
+
+async def test_email_followup_carries_the_family_email():
+    escalation = LoggingEscalation()
+    client = FakeOpenAI(
+        turns=[
+            FakeMessage(
+                tool_calls=[
+                    tool_call(
+                        "request_email_followup",
+                        json.dumps(
+                            {
+                                "question": "Is there a trial in Denver?",
+                                "reason": "not in kb",
+                                "family_email": "parent@example.com",
+                            }
+                        ),
+                    )
+                ]
+            ),
+            FakeMessage(content="Someone from the team will email you."),
+        ]
+    )
+    agent = build(client, escalation)
+
+    await agent.respond([{"role": "user", "content": "Is there a trial in Denver?"}], context())
+
+    assert len(escalation.sent) == 1
+    request = escalation.sent[0]
+    assert request.family_email == "parent@example.com"
+    rendered = request.render()
+    assert "Reply to: parent@example.com" in rendered
+    # The rendered escalation still masks the contact's number.
+    assert "+15555550100" not in rendered
 
 
 def test_a_logged_escalation_clips_what_the_family_wrote():

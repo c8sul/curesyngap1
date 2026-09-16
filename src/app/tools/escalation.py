@@ -31,13 +31,19 @@ def _clip(text: str, limit: int | None) -> str:
 
 @dataclass(frozen=True)
 class EscalationRequest:
-    """An unanswered question, ready to send to a person."""
+    """An unanswered question, ready to send to a person.
+
+    `family_email` is an opt-in reply-to. Present only when the user gave one
+    in the current conversation via `request_email_followup`; unset for a
+    plain `escalate_to_team` call.
+    """
 
     question: str
     reason: str
     conversation_id: str
     channel: str
     contact_address: str | None = None
+    family_email: str | None = None
     transcript: list[dict[str, str]] = field(default_factory=list)
 
     def render(self, truncate_to: int | None = None) -> str:
@@ -51,6 +57,10 @@ class EscalationRequest:
             f"Channel: {self.channel}",
             f"Conversation: {self.conversation_id}",
             f"From: {mask_phone(self.contact_address) if self.contact_address else 'unknown'}",
+        ]
+        if self.family_email:
+            lines.append(f"Reply to: {self.family_email}")
+        lines += [
             "",
             f"Question: {_clip(self.question, truncate_to)}",
             f"Why the agent could not answer: {_clip(self.reason, truncate_to)}",
@@ -136,3 +146,55 @@ def build_escalation_tool(escalation: Escalation, context: EscalationContext) ->
         return {"status": "sent"}
 
     return escalate_to_team
+
+
+def build_email_followup_tool(escalation: Escalation, context: EscalationContext) -> TACTool:
+    """Build the LLM-facing email follow-up tool for one conversation turn.
+
+    Same escalation transport as `build_escalation_tool`, plus an email address
+    the family gave in the current conversation so the team can reply by email
+    rather than through the original channel. The model must not invent an
+    address; the tool description says so, and the team reader gets the raw
+    string on the escalation.
+    """
+
+    @function_tool(
+        name="request_email_followup",
+        description=(
+            "Send a question you cannot answer from the knowledge base to the CURE "
+            "SYNGAP1 team together with the user's email address, so a person can "
+            "reply by email. Use this ONLY after the user has given you their email "
+            "address in the current conversation. Do not invent an email. If the "
+            "user has not given one, ask for it first, or call escalate_to_team "
+            "instead. Tell the user afterwards that someone from the team will "
+            "email them."
+        ),
+    )
+    async def request_email_followup(
+        question: str, reason: str, family_email: str
+    ) -> dict[str, str]:
+        """Send an unanswered question and a reply-to email to the team.
+
+        Args:
+            question: The user's question, in their own words.
+            reason: Why the knowledge base could not answer it.
+            family_email: The email address the user provided in the current
+                conversation. Must be what the user wrote; never invented.
+
+        Returns:
+            Confirmation that the question was sent.
+        """
+        await escalation.send(
+            EscalationRequest(
+                question=question,
+                reason=reason,
+                conversation_id=context.conversation_id,
+                channel=context.channel,
+                contact_address=context.contact_address,
+                family_email=family_email,
+                transcript=list(context.transcript),
+            )
+        )
+        return {"status": "sent"}
+
+    return request_email_followup
