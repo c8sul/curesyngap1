@@ -17,7 +17,7 @@ dev = [
 ]
 # Reading render.yaml in scripts/deploy.py. Not needed to serve a message.
 deploy = [
-    "pyyaml==6.0.5",
+    "pyyaml==6.0.3",
 ]
 
 [build-system]

@@ -400,6 +400,7 @@ Symptoms seen while getting this working end to end, and what each one means.
 | `GET /` returns 404 | Expected. The app registers `/webhook`, `/twiml`, `/ws`, `/healthz` and the sandbox silencer, and no root route. Use `/healthz`. |
 | The first message is slow or returns the fallback | The free instance spun down. See [The free plan sleeps](#the-free-plan-sleeps). |
 | The agent says it has no memory of earlier conversations | Look for a `Recall:` line in the logs. `observations=0` means retrieval found nothing; no line at all means recall was skipped or the contact has no profile yet. |
+| A sender set in `render.yaml` is still empty on the service | A literal `value:` in the blueprint is applied when Render creates the env var, not on every push, and `--sync-env` skips it because it is not `sync: false`. Read it back with `GET /v1/services/<id>/env-vars`, then set it with `PUT .../env-vars/<KEY>` or in the dashboard, and deploy. |
 | A deploy ends `update_failed` right after creation | The service started before its credentials existed. `build_server()` refuses to start without them, by design. Set them, then deploy. |
 
 `docker compose run --rm deploy --logs 50` is the first move for all of these on
