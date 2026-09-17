@@ -37,8 +37,14 @@ WhatsApp or SMS
 ## Text the agent
 
 No setup, no account, no clone. The agent runs at
-<https://curesyngap1-agent.onrender.com> and answers over WhatsApp through
-Twilio's sandbox.
+<https://curesyngap1-agent.onrender.com> and answers over two channels: SMS on
+its own toll-free number, and WhatsApp through Twilio's sandbox.
+
+By SMS, text **+1 855 770 5019**. There is no join code and nothing expires, so
+this is the shortest path to a working conversation — and the reason to read
+[Who can text it](#who-can-text-it) before passing the number on.
+
+By WhatsApp:
 
 1. Ask a maintainer for the sandbox join code. It routes your messages to this
    Twilio account, so it is shared deliberately rather than published here; see
@@ -64,6 +70,8 @@ What to expect:
 
 ### Who can text it
 
+The two channels gate access differently, and SMS barely gates it at all.
+
 The join code belongs to this Twilio account's sandbox, and the sandbox number
 is shared across every Twilio account: the code is what routes a message to this
 agent rather than someone else's. Anyone who has it can reach the agent, and what
@@ -73,6 +81,12 @@ file.
 Anyone with access to the Twilio account reads it off the **Try WhatsApp** page
 of the Console and needs nothing from anyone. Everybody else needs a maintainer
 to pass it on.
+
+The SMS number has no equivalent: anyone who knows it can text the agent, and
+what they say is retained the same way. Knowing the number is the whole of the
+access control, so who it is given to is the decision that matters — and it is
+the decision [Open decision 3](docs/decisions.md) says to settle before the
+number reaches real families.
 
 ## Quickstart
 
@@ -338,18 +352,31 @@ route registered is harmless.
 
 ### An SMS number
 
+CURE SYNGAP1's SMS sender is the toll-free number **+1 855 770 5019**, whose
+toll-free verification is approved. It is set as `TWILIO_PHONE_NUMBER` in
+`.env` and in `render.yaml`, so both channels are live and nothing has to be
+done to serve SMS on a fresh checkout.
+
+To point the agent at a different number instead:
+
 1. Buy an SMS-capable Twilio number. Messaging US numbers requires toll-free
    verification or 10DLC registration first, which takes one to three weeks.
-2. Set `TWILIO_PHONE_NUMBER` to it in E.164 in `.env` and on the Render service.
+2. Set `TWILIO_PHONE_NUMBER` to it in E.164 in `.env` and in `render.yaml`.
    `build_server()` registers the SMS channel whenever that value starts with
-   `+`, so nothing else has to change for the agent to serve it.
+   `+`, so nothing else has to change for the agent to serve it. That key
+   carries a literal `value:` rather than `sync: false`, so
+   `deploy.py --sync-env` does not push it: it reaches the service through a
+   Blueprint sync or the Render dashboard.
 3. Re-run provisioning and deploy, as above.
 
 Inbound SMS is captured by the Conversation Configuration's capture rules, so the
-number's own Messaging webhook stays empty. This path is unverified end to end:
-every live test so far has gone over WhatsApp, and the SMS channel is exercised
-only by the test suite. Expect to debug it with `deploy.py --logs` the first
-time.
+number's own Messaging webhook stays empty. Leaving a webhook or an auto-replying
+Messaging Service on the number is what makes a family get two answers.
+
+Giving the number out is what Decision 3 in [docs/decisions.md](docs/decisions.md)
+is gated on: with `MEMORY_MODE=always`, extraction is not selective, so a family
+describing seizures or medications has that retained. Settle that before the
+number goes anywhere public.
 
 A family who texts after using WhatsApp starts over, because Conversation Memory
 keys a profile on the identifier type: `whatsapp:+1...` and `+1...` are two
@@ -366,12 +393,14 @@ Symptoms seen while getting this working end to end, and what each one means.
 | Messages arrive, no reply, no application log | Same 403. Twilio's delivery is fine and the request never reaches the callback. |
 | The user gets "You said ..." alongside the real answer | The WhatsApp Sandbox Inbound URL is still the stock Twilio Function every new sandbox ships with. Point it at `<host>/whatsapp-sandbox-silence`. |
 | Two replies to one message | A local container and the deployed service are both serving the same Conversation Configuration. Only one webhook host can be current. |
+| A texter gets the agent's answer plus a stock or canned one | The SMS number still has its own Messaging webhook, or belongs to a Messaging Service that replies. Capture rules deliver the message to `/webhook` either way, so both answer. Clear the number's messaging configuration in the Console. |
 | A corrected credential changes nothing | Render keeps the running instance until something deploys. Run `docker compose run --rm deploy`. |
 | One tester gets no replies while others are answered | They went over the rate limit: `RATE_LIMIT_MESSAGES` per minute per contact. The log says `Rate limit: ...`. It clears itself a minute after their last message. |
 | A message gets no reply at all, but the logs show `Sent WHATSAPP response` | The body was over Twilio's 1600-character limit, which Twilio rejects after accepting the send; the Console's Messaging logs show the failure. `Agent.respond()` now replaces any reply over `MAX_REPLY_CHARS` with a short one and logs a warning, so look for that line first. |
 | `GET /` returns 404 | Expected. The app registers `/webhook`, `/twiml`, `/ws`, `/healthz` and the sandbox silencer, and no root route. Use `/healthz`. |
 | The first message is slow or returns the fallback | The free instance spun down. See [The free plan sleeps](#the-free-plan-sleeps). |
 | The agent says it has no memory of earlier conversations | Look for a `Recall:` line in the logs. `observations=0` means retrieval found nothing; no line at all means recall was skipped or the contact has no profile yet. |
+| A sender set in `render.yaml` is still empty on the service | A literal `value:` in the blueprint is applied when Render creates the env var, not on every push, and `--sync-env` skips it because it is not `sync: false`. Read it back with `GET /v1/services/<id>/env-vars`, then set it with `PUT .../env-vars/<KEY>` or in the dashboard, and deploy. |
 | A deploy ends `update_failed` right after creation | The service started before its credentials existed. `build_server()` refuses to start without them, by design. Set them, then deploy. |
 
 `docker compose run --rm deploy --logs 50` is the first move for all of these on
