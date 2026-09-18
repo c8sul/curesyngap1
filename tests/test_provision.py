@@ -12,12 +12,14 @@ import pytest
 from provision import (
     CONVERSATION_API,
     MEMORY_API,
+    MESSAGING_API,
     ProvisionError,
     _items,
     _routing,
     build_channel_settings,
     ensure_conversation_configuration,
     ensure_memory_store,
+    fetch_sender_pool,
     find_by_display_name,
     poll_operation,
     sync_configuration,
@@ -25,6 +27,7 @@ from provision import (
 )
 
 AUTH = "Basic stub"
+SERVICE_SID = "MG" + "0" * 32
 
 
 class Recorder:
@@ -266,13 +269,95 @@ async def test_an_http_error_is_reported_with_its_status_and_body():
             await poll_operation(client, "https://host/op", AUTH)
 
 
+# --- the Messaging Service sender pool ---
+
+
+def _pool_url(page: str = "") -> str:
+    return f"{MESSAGING_API}/Services/{SERVICE_SID}/PhoneNumbers?PageSize=1000{page}"
+
+
+async def test_the_sender_pool_is_read_as_e164_numbers():
+    recorder = Recorder(
+        {
+            ("GET", _pool_url()): {
+                "meta": {"key": "phone_numbers"},
+                "phone_numbers": [
+                    {"sid": "PN1", "phone_number": "+15550100"},
+                    {"sid": "PN2", "phone_number": "+15550101"},
+                ],
+            }
+        }
+    )
+
+    async with recorder.client() as client:
+        assert await fetch_sender_pool(client, AUTH, SERVICE_SID) == ["+15550100", "+15550101"]
+
+
+async def test_a_paged_sender_pool_is_followed_to_the_end():
+    """A pool holds up to 400 numbers by default, so one page is the common
+    case but not the guaranteed one."""
+    second = _pool_url("&Page=1")
+    recorder = Recorder(
+        {
+            ("GET", _pool_url()): {
+                "meta": {"key": "phone_numbers", "next_page_url": second},
+                "phone_numbers": [{"phone_number": "+15550100"}],
+            },
+            ("GET", second): {
+                "meta": {"key": "phone_numbers"},
+                "phone_numbers": [{"phone_number": "+15550101"}],
+            },
+        }
+    )
+
+    async with recorder.client() as client:
+        assert await fetch_sender_pool(client, AUTH, SERVICE_SID) == ["+15550100", "+15550101"]
+
+
+async def test_senders_that_cannot_hold_a_conversation_are_left_out():
+    """A pool can also hold short codes and Alphanumeric Sender IDs, which this
+    endpoint lists without a phone number."""
+    recorder = Recorder(
+        {
+            ("GET", _pool_url()): {
+                "meta": {"key": "phone_numbers"},
+                "phone_numbers": [{"sid": "PN1", "phone_number": "+15550100"}, {"sid": "AS1"}],
+            }
+        }
+    )
+
+    async with recorder.client() as client:
+        assert await fetch_sender_pool(client, AUTH, SERVICE_SID) == ["+15550100"]
+
+
+async def test_a_pool_read_that_fails_is_reported_rather_than_treated_as_empty():
+    recorder = Recorder({("GET", _pool_url()): (404, {"message": "not found"})})
+
+    async with recorder.client() as client:
+        with pytest.raises(ProvisionError, match="sender pool read"):
+            await fetch_sender_pool(client, AUTH, SERVICE_SID)
+
+
 # --- pure helpers ---
 
 
 def test_channel_settings_cover_only_the_configured_senders():
-    assert set(build_channel_settings("+15550100", None)) == {"SMS"}
+    assert set(build_channel_settings(["+15550100"], None)) == {"SMS"}
     assert set(build_channel_settings(None, "whatsapp:+1")) == {"WHATSAPP"}
-    assert set(build_channel_settings("+15550100", "whatsapp:+1")) == {"SMS", "WHATSAPP"}
+    assert set(build_channel_settings(["+15550100"], "whatsapp:+1")) == {"SMS", "WHATSAPP"}
+
+
+def test_every_number_in_a_sender_pool_is_captured():
+    """A family can text any number in a Messaging Service's pool, so a rule
+    for the first one alone would drop the rest on the floor."""
+    rules = build_channel_settings(["+15550100", "+15550101"], None)["SMS"]["captureRules"]
+
+    assert rules == [
+        {"from": "*", "to": "+15550100"},
+        {"from": "+15550100", "to": "*"},
+        {"from": "*", "to": "+15550101"},
+        {"from": "+15550101", "to": "*"},
+    ]
 
 
 def test_no_senders_is_an_error_rather_than_an_empty_configuration():

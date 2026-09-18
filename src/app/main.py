@@ -27,7 +27,8 @@ from tac.server import TACFastAPIServer
 from tac.utils.redaction import mask_address
 
 from app.agent import Agent
-from app.config import TAC_REQUIRED_ENV, AgentSettings, missing_env
+from app.channels import MessagingServiceSMSChannel
+from app.config import TAC_REQUIRED_ENV, AgentSettings, messaging_service_sid, missing_env
 from app.memory import resolve_profile_id
 from app.prompt import RATE_LIMITED_REPLY, load_system_prompt
 from app.tools.escalation import EscalationContext, LoggingEscalation
@@ -162,6 +163,10 @@ def build_server() -> TACFastAPIServer:
     # in use and there is no SMS number to name.
     os.environ.setdefault("TWILIO_PHONE_NUMBER", "")
 
+    # Read up front, with the rest of the startup checks, so a malformed SID
+    # fails the deploy rather than the first reply.
+    service_sid = messaging_service_sid()
+
     settings = AgentSettings.from_env()
     tac = TAC(config=TACConfig.from_env())
 
@@ -265,16 +270,31 @@ def build_server() -> TACFastAPIServer:
     # retrieval of its own: `_recall` does it, because resolving a WhatsApp
     # contact's profile needs an identifier type TAC does not derive. Leaving
     # both on would spend a failing lookup on every message.
+    #
+    # A Messaging Service is its own sender: Twilio picks the number from its
+    # pool and applies the service's opt-out handling. So the service SID alone
+    # serves SMS and TWILIO_PHONE_NUMBER is not needed alongside it. Sending
+    # from the number directly is the default and is what the verified toll-free
+    # sender does, so neither branch is a misconfiguration. See `app.channels`.
     channels: list[MessagingChannel] = []
-    if (os.environ.get("TWILIO_PHONE_NUMBER") or "").strip().startswith("+"):
+    if service_sid:
+        channels.append(MessagingServiceSMSChannel(tac, service_sid))
+        logger.info(f"SMS: sending as Messaging Service {service_sid}")
+    elif (os.environ.get("TWILIO_PHONE_NUMBER") or "").strip().startswith("+"):
         channels.append(SMSChannel(tac))
+        logger.info(
+            "SMS: sending from TWILIO_PHONE_NUMBER directly. Set "
+            "TWILIO_MESSAGING_SERVICE_SID to send as a Messaging Service and pick "
+            "up Twilio's STOP/HELP handling."
+        )
     if os.environ.get("TWILIO_WHATSAPP_NUMBER"):
         channels.append(WhatsAppChannel(tac))
 
     if not channels:
         raise RuntimeError(
-            "No messaging channel is configured. Set TWILIO_PHONE_NUMBER to an "
-            "E.164 number for SMS, TWILIO_WHATSAPP_NUMBER for WhatsApp, or both."
+            "No messaging channel is configured. Set TWILIO_MESSAGING_SERVICE_SID "
+            "(or TWILIO_PHONE_NUMBER) for SMS, TWILIO_WHATSAPP_NUMBER for WhatsApp, "
+            "or both."
         )
     logger.info(f"Channels: {', '.join(channel.get_channel_name() for channel in channels)}")
 

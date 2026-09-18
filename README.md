@@ -152,9 +152,11 @@ Meta Business verification, no approved sender, and no carrier registration.
    the sandbox echoes "You said ..." to every user alongside the real answer.
    That endpoint returns empty TwiML, which sends the user nothing.
 
-For SMS instead, set `TWILIO_PHONE_NUMBER` to an SMS-capable Twilio number in
-E.164. Messaging US numbers additionally requires toll-free verification or
-10DLC registration, which takes one to three weeks.
+SMS needs nothing here: `.env.example` ships the toll-free number CURE SYNGAP1
+has already verified, so both channels are live on a fresh checkout. See
+[An SMS number](#an-sms-number) to point it at a different number, or
+[Sending through a Messaging Service](#sending-through-a-messaging-service) to
+send as a Messaging Service instead.
 
 At least one sender is required. Configuring both does not merge a contact's two
 threads: Conversation Memory keys a profile on the identifier type, so
@@ -213,6 +215,7 @@ Sent WHATSAPP response via Actions API [conversation_id=conv_conversation_..., t
 | `src/app/tools/escalation.py` | Sending an unanswered question to a person |
 | `src/app/data/kb_fixture.json` | Offline page summaries, for tests and credential-free runs |
 | `src/app/config.py` | Environment-derived settings |
+| `src/app/channels.py` | The SMS channel, sent as a Messaging Service |
 | `render.yaml` | The deployed service definition, read by Render's Blueprints |
 | `prompts/system.md` | The live system prompt. Edit this file, not the code |
 | `scripts/provision.py` | Creates the Twilio resources, idempotently |
@@ -367,6 +370,10 @@ To point the agent at a different number instead:
    carries a literal `value:` rather than `sync: false`, so
    `deploy.py --sync-env` does not push it: it reaches the service through a
    Blueprint sync or the Render dashboard.
+
+   Or set `TWILIO_MESSAGING_SERVICE_SID` to a Messaging Service instead and let
+   it pick the sender, which is the same two keys and one more decision; see
+   [Sending through a Messaging Service](#sending-through-a-messaging-service).
 3. Re-run provisioning and deploy, as above.
 
 Inbound SMS is captured by the Conversation Configuration's capture rules, so the
@@ -377,6 +384,68 @@ Giving the number out is what Decision 3 in [docs/decisions.md](docs/decisions.m
 is gated on: with `MEMORY_MODE=always`, extraction is not selective, so a family
 describing seizures or medications has that retained. Settle that before the
 number goes anywhere public.
+
+### Sending through a Messaging Service
+
+This is optional, and off by default. SMS works without it, from the verified
+toll-free number above.
+
+A Messaging Service adds two things a bare number does not have: Twilio's
+STOP/HELP keyword handling, and a sender pool it draws from. For a US 10DLC
+sender it is also where the campaign registration lives — not the case here,
+where the sender is a toll-free number whose verification is already approved,
+so opt-out handling is the reason that applies to this agent.
+
+A Messaging Service is a sender in its own right: the Messages API's `From`
+accepts a phone number, an Alphanumeric Sender ID **or** a Messaging Service
+SID, and given the SID Twilio picks the number from the service's pool. So it
+serves SMS on its own, with no `TWILIO_PHONE_NUMBER` beside it:
+
+```bash
+# In .env and on the Render service, then re-provision and deploy.
+TWILIO_MESSAGING_SERVICE_SID=MG00000000000000000000000000000000
+```
+
+Set both and the service wins — it is the sender either way, and there is no
+second SMS channel. WhatsApp is untouched: the sandbox sender is in no service's
+pool.
+
+**Two things to settle before turning it on.** A Messaging Service with its own
+inbound webhook or auto-reply answers alongside the agent, which is the
+two-answers symptom above: capture rules deliver the message to `/webhook`
+regardless, so both reply. And the service picks the sender from its pool, so if
+the pool holds anything other than **+1 855 770 5019**, a family can get a reply
+from a number they were never given — the number this README publishes. Check
+the pool before switching; `provision.py` prints it.
+
+**Inbound still comes from the pool.** Capture rules match E.164 addresses, not
+service SIDs, so `provision.py` reads the service's sender pool and writes a
+capture rule for every number in it. That is what makes a family who texts any
+number in the pool reach the agent, and it is why provisioning calls the
+Messaging API at all. Adding a number to the pool later means re-running
+provisioning.
+
+**The agent's Conversation Orchestrator address is still a phone number.** CO
+creates the agent participant at the number the family texted, and
+`src/app/channels.py` reports that address so TAC's participant reconciliation
+finds it rather than adding a second participant. Only the reply's `From`
+carries the service SID.
+
+Leaving `TWILIO_MESSAGING_SERVICE_SID` empty keeps the previous behaviour —
+sending from `TWILIO_PHONE_NUMBER` directly — and logs a warning at startup
+saying so.
+
+**Unverified against a live account.** The Messages API documents a Messaging
+Service SID as a valid `From`, and Conversation Orchestrator's `from` takes an
+explicit `{address, channel}`, but whether CO forwards a non-E.164 address
+straight through rather than trying to resolve it to a participant has not been
+confirmed here — CO's own Channels reference says SMS addresses are E.164. If it
+turns out CO refuses it, the fallback is the other route to the same place: keep
+a pool number in `TWILIO_PHONE_NUMBER` as the `From` and pass the service in the
+action's `channelSettings` instead, as `messagingServiceSid`. That field is an
+open pass-through, and TAC's own `ActionChannelSettings` docstring names
+`messagingServiceSid` as an example of what belongs in it. In `channels.py` that
+is a change to `send_response` only.
 
 A family who texts after using WhatsApp starts over, because Conversation Memory
 keys a profile on the identifier type: `whatsapp:+1...` and `+1...` are two
@@ -402,6 +471,9 @@ Symptoms seen while getting this working end to end, and what each one means.
 | The agent says it has no memory of earlier conversations | Look for a `Recall:` line in the logs. `observations=0` means retrieval found nothing; no line at all means recall was skipped or the contact has no profile yet. |
 | A sender set in `render.yaml` is still empty on the service | A literal `value:` in the blueprint is applied when Render creates the env var, not on every push, and `--sync-env` skips it because it is not `sync: false`. Read it back with `GET /v1/services/<id>/env-vars`, then set it with `PUT .../env-vars/<KEY>` or in the dashboard, and deploy. |
 | A deploy ends `update_failed` right after creation | The service started before its credentials existed. `build_server()` refuses to start without them, by design. Set them, then deploy. |
+| SMS gets no reply and the logs show `Failed to create action` | Conversation Orchestrator rejected the send. If the error names the `from` address, it did not accept the Messaging Service SID as a sender — see [Sending through a Messaging Service](#sending-through-a-messaging-service) for the fallback. |
+| SMS gets no reply and the Console's Messaging logs show error 21704 | The Messaging Service's sender pool is empty, so Twilio has no number to send from. `provision.py` refuses to run in that state, so this means the pool was emptied afterwards. |
+| SMS replies are delivered but the recipient never sees them | Carrier filtering. Check the toll-free verification is still approved in the Console; for a 10DLC sender instead, check the campaign on its Messaging Service. The startup log says which of the two sender paths SMS is on. |
 
 `docker compose run --rm deploy --logs 50` is the first move for all of these on
 a deployed service, and `docker compose logs agent` locally.

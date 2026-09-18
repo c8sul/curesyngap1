@@ -28,6 +28,8 @@ ENV = {
     "TWILIO_WHATSAPP_NUMBER": "whatsapp:+14155238886",
 }
 
+SERVICE_SID = "MG" + "0" * 32
+
 
 @dataclass
 class FakeProfileLookup:
@@ -84,6 +86,7 @@ class FakeServer:
 class FakeChannel:
     tac: object
     name: str = "STUB"
+    messaging_service_sid: str | None = None
 
     def get_channel_name(self) -> str:
         return self.name
@@ -114,7 +117,11 @@ def wired(monkeypatch):
 
     for key, value in ENV.items():
         monkeypatch.setenv(key, value)
-    for key in ("TWILIO_PHONE_NUMBER", "TWILIO_KNOWLEDGE_BASE_ID"):
+    for key in (
+        "TWILIO_PHONE_NUMBER",
+        "TWILIO_KNOWLEDGE_BASE_ID",
+        "TWILIO_MESSAGING_SERVICE_SID",
+    ):
         monkeypatch.delenv(key, raising=False)
 
     monkeypatch.setattr(main, "TAC", lambda config: tac)
@@ -123,6 +130,11 @@ def wired(monkeypatch):
     monkeypatch.setattr(main, "TACFastAPIServer", FakeServer)
     monkeypatch.setattr(main, "SMSChannel", lambda tac: FakeChannel(tac, "SMS"))
     monkeypatch.setattr(main, "WhatsAppChannel", lambda tac: FakeChannel(tac, "WHATSAPP"))
+    monkeypatch.setattr(
+        main,
+        "MessagingServiceSMSChannel",
+        lambda tac, service_sid: FakeChannel(tac, "SMS", service_sid),
+    )
     monkeypatch.setattr(main, "with_tac_memory", lambda client, memory, context: client)
     monkeypatch.setattr(main, "HISTORIES", {})
     return tac, client
@@ -183,6 +195,75 @@ def test_a_phone_number_that_is_not_e164_registers_no_sms_channel(monkeypatch, w
     server = main.build_server()
 
     assert [channel.name for channel in server.messaging_channels] == ["WHATSAPP"]
+
+
+# --- the Messaging Service ---
+
+
+def test_a_messaging_service_routes_sms_through_it(monkeypatch, wired):
+    """A service is what carries the 10DLC registration and the STOP/HELP
+    handling, so SMS goes through it rather than out of the number directly."""
+    monkeypatch.setenv("TWILIO_PHONE_NUMBER", "+15550100")
+    monkeypatch.setenv("TWILIO_MESSAGING_SERVICE_SID", SERVICE_SID)
+
+    server = main.build_server()
+
+    sms = next(channel for channel in server.messaging_channels if channel.name == "SMS")
+    assert sms.messaging_service_sid == SERVICE_SID
+
+
+def test_sms_without_a_messaging_service_still_sends_from_the_number(monkeypatch, wired):
+    """The service is additive: SMS has to keep working without one."""
+    monkeypatch.setenv("TWILIO_PHONE_NUMBER", "+15550100")
+
+    server = main.build_server()
+
+    sms = next(channel for channel in server.messaging_channels if channel.name == "SMS")
+    assert sms.messaging_service_sid is None
+
+
+def test_a_messaging_service_alone_serves_sms(monkeypatch, wired):
+    """The service is the sender — Twilio picks the number from its pool — so
+    it needs no TWILIO_PHONE_NUMBER beside it."""
+    monkeypatch.setenv("TWILIO_MESSAGING_SERVICE_SID", SERVICE_SID)
+
+    server = main.build_server()
+
+    sms = next(channel for channel in server.messaging_channels if channel.name == "SMS")
+    assert sms.messaging_service_sid == SERVICE_SID
+
+
+def test_a_messaging_service_takes_precedence_over_a_configured_number(monkeypatch, wired):
+    """Both set is not two SMS channels: the service is the sender either way."""
+    monkeypatch.setenv("TWILIO_PHONE_NUMBER", "+15550100")
+    monkeypatch.setenv("TWILIO_MESSAGING_SERVICE_SID", SERVICE_SID)
+
+    server = main.build_server()
+
+    assert [channel.name for channel in server.messaging_channels] == ["SMS", "WHATSAPP"]
+
+
+@pytest.mark.parametrize("value", ["MG123", "SK" + "0" * 32, "not-a-sid", "MG" + "z" * 32])
+def test_a_malformed_messaging_service_sid_is_refused_at_startup(monkeypatch, wired, value):
+    """Twilio accepts a send naming a service that does not exist and drops it
+    afterwards, so nothing would report this back to the family."""
+    monkeypatch.setenv("TWILIO_PHONE_NUMBER", "+15550100")
+    monkeypatch.setenv("TWILIO_MESSAGING_SERVICE_SID", value)
+
+    with pytest.raises(RuntimeError, match="TWILIO_MESSAGING_SERVICE_SID"):
+        main.build_server()
+
+
+def test_whatsapp_is_not_routed_through_the_messaging_service(monkeypatch, wired):
+    """The sandbox sender is in no service's pool, so naming one on a WhatsApp
+    send would be rejected with error 21711."""
+    monkeypatch.setenv("TWILIO_PHONE_NUMBER", "+15550100")
+    monkeypatch.setenv("TWILIO_MESSAGING_SERVICE_SID", SERVICE_SID)
+
+    server = main.build_server()
+
+    whatsapp = next(channel for channel in server.messaging_channels if channel.name == "WHATSAPP")
+    assert whatsapp.messaging_service_sid is None
 
 
 async def test_what_is_remembered_reaches_the_model(wired):

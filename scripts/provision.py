@@ -10,8 +10,14 @@ Ensures three things exist and prints the `.env` lines for them:
 3. A Conversation Configuration bound to that store, with memory extraction on,
    capture rules for whichever senders are configured, and a status callback at
    `<domain>/webhook`.
-   Set `TWILIO_PHONE_NUMBER` for SMS, `TWILIO_WHATSAPP_NUMBER` for WhatsApp, or
-   both. At least one is required.
+   Set `TWILIO_MESSAGING_SERVICE_SID` or `TWILIO_PHONE_NUMBER` for SMS,
+   `TWILIO_WHATSAPP_NUMBER` for WhatsApp, or both. At least one is required.
+
+A Messaging Service is an alternative way to serve SMS: it adds Twilio's
+STOP/HELP handling, and it is a sender in its own right, so no
+`TWILIO_PHONE_NUMBER` is needed alongside it. The SMS capture rules are then
+built from the service's sender pool, because capture rules match E.164
+addresses and a family can text any number in the pool.
 
 Re-running is safe. Each resource is reused when its id is already in the
 environment, or when one with the same display name already exists on the
@@ -35,9 +41,12 @@ import sys
 import httpx
 from dotenv import load_dotenv
 
+from app.config import MESSAGING_SERVICE_SID
+
 CLASSIC_API = "https://api.twilio.com/2010-04-01"
 MEMORY_API = "https://memory.twilio.com/v1/ControlPlane"
 CONVERSATION_API = "https://conversations.twilio.com/v2/ControlPlane"
+MESSAGING_API = "https://messaging.twilio.com/v1"
 
 POLL_ATTEMPTS = 30
 POLL_SECONDS = 2.0
@@ -319,20 +328,29 @@ async def create_conversation_configuration(
     return configuration_id
 
 
-def _capture_rules(address: str) -> list[dict[str, str]]:
-    """Capture both directions of traffic for one agent address."""
-    return [{"from": "*", "to": address}, {"from": address, "to": "*"}]
+def _capture_rules(*addresses: str) -> list[dict[str, str]]:
+    """Capture both directions of traffic for each agent address."""
+    return [
+        rule
+        for address in addresses
+        for rule in ({"from": "*", "to": address}, {"from": address, "to": "*"})
+    ]
 
 
 def build_channel_settings(
-    phone_number: str | None, whatsapp_number: str | None
+    sms_numbers: list[str] | None, whatsapp_number: str | None
 ) -> dict[str, object]:
-    """Channel settings for the senders that are configured."""
+    """Channel settings for the senders that are configured.
+
+    SMS takes a list because a Messaging Service's sender pool can hold more
+    than one number and a family can text any of them; without a service it is
+    the one configured number.
+    """
     settings: dict[str, object] = {}
-    if phone_number:
+    if sms_numbers:
         settings["SMS"] = {
             "statusTimeouts": {"inactive": 2, "closed": 3},
-            "captureRules": _capture_rules(phone_number),
+            "captureRules": _capture_rules(*sms_numbers),
         }
     if whatsapp_number:
         settings["WHATSAPP"] = {
@@ -342,6 +360,32 @@ def build_channel_settings(
     if not settings:
         raise ProvisionError("No senders configured; nothing to capture.")
     return settings
+
+
+async def fetch_sender_pool(client: httpx.AsyncClient, auth: str, service_sid: str) -> list[str]:
+    """The phone numbers in a Messaging Service's sender pool, in E.164.
+
+    These are the only addresses the agent can be texted on and the only ones it
+    can answer from, so they are what the SMS capture rules are built from.
+
+    A pool can also hold short codes and Alphanumeric Sender IDs. Neither can
+    carry a two-way conversation, so neither is listed as a phone number by this
+    endpoint and neither is captured.
+    """
+    numbers: list[str] = []
+    url = f"{MESSAGING_API}/Services/{service_sid}/PhoneNumbers?PageSize=1000"
+    while url:
+        body = _json_or_raise(
+            await client.get(url, headers={"Authorization": auth}),
+            f"Messaging Service {service_sid} sender pool read",
+        )
+        numbers += [
+            item["phone_number"]
+            for item in _items(body)
+            if isinstance(item, dict) and item.get("phone_number")
+        ]
+        url = (body.get("meta") or {}).get("next_page_url") or ""
+    return numbers
 
 
 async def list_resources(client: httpx.AsyncClient, auth: str) -> None:
@@ -406,6 +450,7 @@ async def main() -> int:
     auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
     phone_number = (os.environ.get("TWILIO_PHONE_NUMBER") or "").strip()
     whatsapp_number = (os.environ.get("TWILIO_WHATSAPP_NUMBER") or "").strip()
+    service_sid = (os.environ.get("TWILIO_MESSAGING_SERVICE_SID") or "").strip()
     known_store_id = (os.environ.get("TWILIO_MEMORY_STORE_ID") or "").strip()
 
     if not account_sid or not auth_token:
@@ -473,13 +518,47 @@ async def main() -> int:
                 file=sys.stderr,
             )
             return 1
-        if not phone_number and not whatsapp_number:
+        if service_sid and not MESSAGING_SERVICE_SID.match(service_sid):
             print(
-                "Set TWILIO_PHONE_NUMBER, TWILIO_WHATSAPP_NUMBER, or both in .env. "
-                "For sandbox testing, TWILIO_WHATSAPP_NUMBER=whatsapp:+14155238886.",
+                f"TWILIO_MESSAGING_SERVICE_SID is {service_sid!r}; it must be a "
+                "Messaging Service SID, which is MG followed by 32 hex characters.",
                 file=sys.stderr,
             )
             return 1
+        if not phone_number and not whatsapp_number and not service_sid:
+            print(
+                "Set TWILIO_MESSAGING_SERVICE_SID or TWILIO_PHONE_NUMBER for SMS, "
+                "TWILIO_WHATSAPP_NUMBER for WhatsApp, or both, in .env. For sandbox "
+                "testing, TWILIO_WHATSAPP_NUMBER=whatsapp:+14155238886.",
+                file=sys.stderr,
+            )
+            return 1
+
+        # With a service, the pool is the set of numbers a family can text, so
+        # it is what gets captured. Without one, the single configured number is.
+        sms_numbers = [phone_number] if phone_number else None
+        if service_sid:
+            pool = await fetch_sender_pool(client, auth, service_sid)
+            if not pool:
+                print(
+                    f"Messaging Service {service_sid} has no phone numbers in its "
+                    "sender pool, so it cannot send or receive. Add one in the Console "
+                    "under Messaging > Services > Sender Pool.",
+                    file=sys.stderr,
+                )
+                return 1
+            sms_numbers = pool
+            print(f"Messaging Service {service_sid} sender pool: {', '.join(pool)}")
+            if phone_number and phone_number not in pool:
+                # Not an error: the service is the sender, so the number is only
+                # a fallback for a conversation this app never starts. But
+                # nothing texted to it would be captured, which is worth saying.
+                print(
+                    f"  Note: TWILIO_PHONE_NUMBER is {phone_number}, which is not in "
+                    "that pool, so messages texted to it are not captured. The service "
+                    "is the sender, so the number is not otherwise used — leave it "
+                    "empty unless it is a pool member."
+                )
 
         store_name = validate_display_name(f"{args.name}-memory")
         config_name = validate_display_name(args.name)
@@ -496,7 +575,7 @@ async def main() -> int:
             os.environ.get("TWILIO_CONVERSATION_CONFIGURATION_ID") or ""
         ).strip() or None
 
-        channel_settings = build_channel_settings(phone_number or None, whatsapp_number or None)
+        channel_settings = build_channel_settings(sms_numbers, whatsapp_number or None)
 
         configuration_id, configuration_created = await ensure_conversation_configuration(
             client,
@@ -530,10 +609,10 @@ async def main() -> int:
         print("\nAnd the API key printed above, if you have not already:\n")
         print(f"TWILIO_API_KEY={api_key}")
         print(f"TWILIO_API_SECRET={api_secret}")
-    print(
-        "Senders captured: "
-        + ", ".join(filter(None, (phone_number or None, whatsapp_number or None)))
-    )
+    captured = [*(sms_numbers or []), *filter(None, (whatsapp_number,))]
+    print("Senders captured: " + ", ".join(captured))
+    if service_sid:
+        print(f"SMS sends as Messaging Service {service_sid}, which picks the sender")
     print(f"Webhook the configuration will call: {webhook_url}")
     return 0
 
