@@ -18,28 +18,45 @@ from tac.models.session import AuthorInfo
 from app.channels import MAX_CONVERSATIONS, MessagingServiceSMSChannel
 
 SERVICE_SID = "MG" + "0" * 32
-AGENT_NUMBER = "+15550100"
-POOL_NUMBER = "+15550199"
+POOL_NUMBER = "+15550100"
+SECOND_POOL_NUMBER = "+15550199"
 FAMILY_NUMBER = "+15557654321"
 
 
 @dataclass
 class FakeConfig:
-    phone_number: str = AGENT_NUMBER
+    """No sender field: the channel reads none. That is the point of it."""
+
     conversation_configuration_id: str = "conv_configuration_1"
 
 
 @dataclass
+class FakeParticipant:
+    id: str
+    type: str | None = "CUSTOMER"
+
+
+@dataclass
 class FakeOrchestrator:
-    """Records the actions the channel creates, or fails on demand."""
+    """Records the actions the channel creates, or fails on demand.
+
+    `participants` is what TAC's ownership check reads when the address alone
+    does not settle whether a message is the agent's own.
+    """
 
     actions: list[dict[str, Any]] = field(default_factory=list)
     error: Exception | None = None
+    participants: list[FakeParticipant] = field(default_factory=list)
+    participant_lists: int = 0
 
     async def create_action(self, conversation_id: str, request: Any) -> None:
         if self.error:
             raise self.error
         self.actions.append(request.model_dump(by_alias=True, exclude_none=True))
+
+    async def list_participants(self, conversation_id: str) -> list[FakeParticipant]:
+        self.participant_lists += 1
+        return list(self.participants)
 
 
 @dataclass
@@ -50,13 +67,8 @@ class FakeTAC:
     conversation_orchestrator_client: FakeOrchestrator = field(default_factory=FakeOrchestrator)
 
 
-def channel(
-    phone_number: str = AGENT_NUMBER, orchestrator: FakeOrchestrator | None = None
-) -> MessagingServiceSMSChannel:
-    tac = FakeTAC(
-        config=FakeConfig(phone_number=phone_number),
-        conversation_orchestrator_client=orchestrator or FakeOrchestrator(),
-    )
+def channel(orchestrator: FakeOrchestrator | None = None) -> MessagingServiceSMSChannel:
+    tac = FakeTAC(conversation_orchestrator_client=orchestrator or FakeOrchestrator())
     return MessagingServiceSMSChannel(tac, SERVICE_SID)
 
 
@@ -124,10 +136,10 @@ async def test_the_send_names_the_messaging_service_as_its_sender():
 
 
 async def test_no_sender_number_is_needed_to_send():
-    """The point of naming the service: nothing here reads a configured number,
-    so TWILIO_PHONE_NUMBER can be empty."""
+    """The point of naming the service: nothing reads a configured sender, so
+    there is no TWILIO_PHONE_NUMBER to keep in step with the service."""
     orchestrator = FakeOrchestrator()
-    sms = channel(phone_number="", orchestrator=orchestrator)
+    sms = channel(orchestrator=orchestrator)
     reconciled(sms)
 
     await sms.send_response("conv_conversation_1", "Here is the answer.")
@@ -192,25 +204,25 @@ async def test_a_failed_send_is_logged_rather_than_raised():
 # --- answering from an address that is in the pool ---
 
 
-def test_the_reply_goes_out_on_the_number_the_family_texted():
+async def test_the_reply_goes_out_on_the_number_the_family_texted():
     """A pool can hold several numbers. Answering from the configured one would
     reply from a number the family never wrote to, and error 21711 if that
     number is not in the pool at all."""
     sms = channel()
 
-    sms._remember_agent_address(inbound(to=POOL_NUMBER))
+    await sms._remember_agent_address(inbound(to=POOL_NUMBER))
 
     assert sms.get_agent_address("conv_conversation_1").address == POOL_NUMBER
 
 
-def test_each_conversation_keeps_its_own_number():
+async def test_each_conversation_keeps_its_own_number():
     sms = channel()
 
-    sms._remember_agent_address(inbound(to=POOL_NUMBER, conversation_id="conv_a"))
-    sms._remember_agent_address(inbound(to=AGENT_NUMBER, conversation_id="conv_b"))
+    await sms._remember_agent_address(inbound(to=POOL_NUMBER, conversation_id="conv_a"))
+    await sms._remember_agent_address(inbound(to=SECOND_POOL_NUMBER, conversation_id="conv_b"))
 
     assert sms.get_agent_address("conv_a").address == POOL_NUMBER
-    assert sms.get_agent_address("conv_b").address == AGENT_NUMBER
+    assert sms.get_agent_address("conv_b").address == SECOND_POOL_NUMBER
 
 
 async def test_the_number_is_noted_before_the_base_class_handles_the_message(monkeypatch):
@@ -229,41 +241,71 @@ async def test_the_number_is_noted_before_the_base_class_handles_the_message(mon
     assert address_during_handling == [POOL_NUMBER]
 
 
-def test_a_conversation_with_no_inbound_message_falls_back_to_the_configured_number():
-    """Only an outbound-initiated conversation reaches this, which this app
-    never starts; the fallback is TAC's own behavior."""
-    assert channel().get_agent_address("conv_unseen").address == AGENT_NUMBER
+def test_a_conversation_with_no_inbound_message_is_an_error():
+    """There is no configured sender to fall back to — the Messaging Service is
+    the sender and has no single address — so guessing one would reconcile
+    against the wrong participant. Only an outbound-initiated conversation
+    reaches this, and this app starts none."""
+    with pytest.raises(RuntimeError, match="No agent address known"):
+        channel().get_agent_address("conv_unseen")
 
 
-def test_the_agents_own_reply_does_not_become_the_agent_address():
+async def test_the_agents_own_reply_does_not_become_the_agent_address():
     """The capture rules cover both directions, so a reply the agent sent comes
-    back with our number as its author and the family's as its recipient.
-    Reading the recipient off that would answer from the family's own number."""
+    back with our sender as its author and the contact's address as its
+    recipient. Reading the recipient off that would answer from the contact's
+    own number."""
     sms = channel()
-    sms._remember_agent_address(inbound(to=POOL_NUMBER))
+    await sms._remember_agent_address(inbound(to=POOL_NUMBER))
 
-    sms._remember_agent_address(outbound(frm=POOL_NUMBER))
+    await sms._remember_agent_address(outbound(frm=POOL_NUMBER))
 
     assert sms.get_agent_address("conv_conversation_1").address == POOL_NUMBER
 
 
-def test_an_outbound_message_from_the_configured_number_is_recognized_on_its_own():
-    """Recognizing it must not depend on having seen the inbound message first,
-    because the configured number is known from the start."""
-    sms = channel()
+async def test_the_agents_own_reply_is_recognized_after_a_restart():
+    """Nothing is remembered after a restart, so the address cannot settle the
+    direction. Asking Conversation Orchestrator for the author's participant
+    type is what stops the contact's address being recorded as ours — and it
+    would stick, because an address is recorded once."""
+    orchestrator = FakeOrchestrator(participants=[FakeParticipant("p_author", "AI_AGENT")])
+    sms = channel(orchestrator=orchestrator)
 
-    sms._remember_agent_address(outbound(frm=AGENT_NUMBER, conversation_id="conv_a"))
+    await sms._remember_agent_address(outbound(frm=POOL_NUMBER))
 
-    assert "conv_a" not in sms._agent_addresses
+    assert sms._agent_addresses == {}
+    assert orchestrator.participant_lists == 1
 
 
-def test_the_first_number_a_conversation_arrived_on_is_the_one_kept():
+async def test_a_contacts_first_message_is_recorded_despite_the_same_check():
+    """The same lookup must not reject an ordinary inbound message: the author
+    is the contact, so its participant type is not an agent one."""
+    orchestrator = FakeOrchestrator(participants=[FakeParticipant("p_author", "CUSTOMER")])
+    sms = channel(orchestrator=orchestrator)
+
+    await sms._remember_agent_address(inbound(to=POOL_NUMBER))
+
+    assert sms.get_agent_address("conv_conversation_1").address == POOL_NUMBER
+
+
+async def test_a_remembered_conversation_costs_no_participant_lookup():
+    """The lookup is per new conversation, not per message."""
+    orchestrator = FakeOrchestrator(participants=[FakeParticipant("p_author", "CUSTOMER")])
+    sms = channel(orchestrator=orchestrator)
+    await sms._remember_agent_address(inbound(to=POOL_NUMBER))
+
+    await sms._remember_agent_address(inbound(to=POOL_NUMBER))
+
+    assert orchestrator.participant_lists == 1
+
+
+async def test_the_first_number_a_conversation_arrived_on_is_the_one_kept():
     """Conversation grouping is per participant address, so the number cannot
     change mid-conversation; a later event claiming otherwise is not trusted."""
     sms = channel()
-    sms._remember_agent_address(inbound(to=POOL_NUMBER))
+    await sms._remember_agent_address(inbound(to=POOL_NUMBER))
 
-    sms._remember_agent_address(inbound(to=AGENT_NUMBER))
+    await sms._remember_agent_address(inbound(to=SECOND_POOL_NUMBER))
 
     assert sms.get_agent_address("conv_conversation_1").address == POOL_NUMBER
 
@@ -288,40 +330,43 @@ def test_the_first_number_a_conversation_arrived_on_is_the_one_kept():
         },
     ],
 )
-def test_a_payload_without_an_sms_recipient_is_left_alone(webhook):
-    """Anything unexpected keeps the configured number rather than being
-    guessed at, which is what TAC would have done without this class."""
+async def test_a_payload_without_an_sms_recipient_is_left_alone(webhook):
+    """Anything unexpected records nothing rather than being guessed at. The
+    conversation then has no agent address, which `get_agent_address` reports
+    as an error instead of answering from somewhere arbitrary."""
     sms = channel()
 
-    sms._remember_agent_address(webhook)
+    await sms._remember_agent_address(webhook)
 
-    assert sms.get_agent_address("conv_conversation_1").address == AGENT_NUMBER
+    assert sms._agent_addresses == {}
 
 
 # --- not answering our own messages ---
 
 
-def test_an_address_the_agent_speaks_from_is_recognized_as_its_own():
+async def test_an_address_the_agent_speaks_from_is_recognized_as_its_own():
     """Outbound traffic is captured too, so a reply the agent sent from a pool
-    number comes back as an inbound author and must not be answered."""
+    sender comes back as an inbound author and must not be answered. The
+    remembered addresses are the whole of what this knows — there is no
+    configured sender — so an unseen pool sender is TAC's API check to catch."""
     sms = channel()
-    sms._remember_agent_address(inbound(to=POOL_NUMBER))
+    await sms._remember_agent_address(inbound(to=POOL_NUMBER))
 
     assert sms.is_default_agent_address(POOL_NUMBER)
-    assert sms.is_default_agent_address(AGENT_NUMBER)
-    assert not sms.is_default_agent_address("+15557654321")
+    assert not sms.is_default_agent_address(SECOND_POOL_NUMBER)
+    assert not sms.is_default_agent_address(FAMILY_NUMBER)
 
 
 # --- bounded memory ---
 
 
-def test_remembered_numbers_are_capped_oldest_first():
+async def test_remembered_numbers_are_capped_oldest_first():
     """Nothing deletes an entry on its own, so the cap is what keeps a
     long-running process from growing without limit."""
     sms = channel()
 
     for index in range(MAX_CONVERSATIONS + 10):
-        sms._remember_agent_address(inbound(to=POOL_NUMBER, conversation_id=f"conv_{index}"))
+        await sms._remember_agent_address(inbound(to=POOL_NUMBER, conversation_id=f"conv_{index}"))
 
     assert len(sms._agent_addresses) == MAX_CONVERSATIONS
     assert "conv_0" not in sms._agent_addresses

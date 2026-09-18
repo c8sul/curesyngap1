@@ -4,23 +4,18 @@
 # which reads it from the repository. The secrets are marked `sync: false`, so
 # Render prompts for them once and stores them; they are never held here.
 #
-# The public URL this service is assigned has to reach Twilio in two places,
-# neither of which this file controls:
-#
-#   1. The Conversation Configuration's status callback. Run
-#      `docker compose run --rm provision --webhook-domain <host>` with the
-#      Render host to point it here.
-#   2. The WhatsApp Sandbox Inbound URL, set to `<host>/whatsapp-sandbox-silence`
-#      in the Console. It has no API.
+# The public URL this service is assigned has to reach Twilio in one place this
+# file does not control: the Conversation Configuration's status callback. Run
+# `docker compose run --rm provision --webhook-domain <host>` with the Render
+# host to point it here.
 services:
   - type: web
     name: curesyngap1-agent
     runtime: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    # `python -m app.main` serves TAC's app directly and so carries neither
-    # /healthz nor the sandbox silencer, both of which `create_app()` adds.
-    # Render routes traffic to $PORT.
+    # `python -m app.main` serves TAC's app directly and so carries no
+    # /healthz, which `create_app()` adds. Render routes traffic to $PORT.
     dockerCommand: uvicorn --factory app.main:create_app --host 0.0.0.0 --port $PORT
     plan: free
     region: oregon
@@ -48,23 +43,21 @@ services:
         sync: false
       - key: TWILIO_KNOWLEDGE_BASE_ID
         sync: false
-      # Senders. WhatsApp alone is a working setup; the shared sandbox sender
-      # needs no Meta verification. The toll-free SMS sender requires
-      # toll-free verification before sending SMS.
-      - key: TWILIO_WHATSAPP_NUMBER
-        value: whatsapp:+14155238886
-      - key: TWILIO_PHONE_NUMBER
-        value: "+18557705019"
-      # Set this to a Messaging Service to send SMS as the service instead,
-      # which adds Twilio's STOP/HELP keyword handling and lets the service
-      # pick the sender from its pool. It is the sender in its own right, so it
-      # needs no TWILIO_PHONE_NUMBER beside it. Empty, as here, sends from the
-      # toll-free number above directly, which is what is verified today.
-      # Two things to check before setting it: the service must not have an
-      # inbound webhook or auto-reply, or a texter gets two answers, and its
-      # pool decides which number a family sees a reply from.
+      # The sender, and the only sender configuration there is. The agent sends
+      # as this Messaging Service, and provisioning reads its Senders page —
+      # phone numbers, short codes, WhatsApp — to build the capture rules that
+      # decide what reaches the agent. So adding a sender to the service and
+      # re-provisioning is the whole of adding a sender; nothing is listed here
+      # to be kept in step with it. The toll-free SMS sender +18557705019 is in
+      # this service and its verification is approved.
+      # The service must not carry an inbound webhook or auto-reply of its own,
+      # or a contact gets the agent's answer alongside it.
+      #
+      # TWILIO_PHONE_NUMBER and TWILIO_WHATSAPP_NUMBER are deliberately absent:
+      # they configured senders before this and now configure nothing. Setting
+      # either changes no behaviour.
       - key: TWILIO_MESSAGING_SERVICE_SID
-        value: ""
+        value: MG81a3a0597d8befe7fb1b74732102b08a
       # Agent tuning. These match .env.example; see it for what each does.
       - key: OPENAI_MODEL
         value: gpt-5.6-luna

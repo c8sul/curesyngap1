@@ -10,15 +10,15 @@ Families and supporters message a number and ask plain-language questions:
 
 The agent answers briefly and links to the most relevant page on curesyngap1.org. It does not give medical advice. When it cannot answer from the knowledge base, it escalates the question to the team rather than guessing.
 
-It runs at <https://curesyngap1-agent.onrender.com> and serves WhatsApp through Twilio's sandbox. [Text the agent](#text-the-agent) is how to try it; [Quickstart](#quickstart) is how to run it locally.
+It runs at <https://curesyngap1-agent.onrender.com> and serves SMS on a toll-free number. [Text the agent](#text-the-agent) is how to try it; [Quickstart](#quickstart) is how to run it locally.
 
 > **Decision needed before real families use this: what memory may retain.**
 > Conversation Memory is enabled, and it writes observations and conversation
 > summaries from whatever a family says. Extraction is not selective, so a
 > family describing seizures or medications would have that retained and read
 > back on their next message. This is on deliberately, to make the behavior
-> visible rather than to settle the question. It applies to anyone holding the
-> sandbox join code, on a public host, so widen who can text it only once the
+> visible rather than to settle the question. It applies to anyone who knows
+> the number, on a public host, so widen who it is given to only once the
 > question is answered. See [Memory](#memory),
 > [Who can text it](#who-can-text-it), and
 > [Open decision 3](docs/decisions.md).
@@ -37,24 +37,18 @@ WhatsApp or SMS
 ## Text the agent
 
 No setup, no account, no clone. The agent runs at
-<https://curesyngap1-agent.onrender.com> and answers over two channels: SMS on
-its own toll-free number, and WhatsApp through Twilio's sandbox.
+<https://curesyngap1-agent.onrender.com> and answers over SMS on its own
+toll-free number.
 
-By SMS, text **+1 855 770 5019**. There is no join code and nothing expires, so
-this is the shortest path to a working conversation — and the reason to read
-[Who can text it](#who-can-text-it) before passing the number on.
+Text **+1 855 770 5019** and ask it something the site covers: "What is the
+SYNGAP1 ICD-10 code?", "How do I start a fundraiser?", "What should I do if I
+need medical information?" There is no join code and nothing expires, which is
+also the reason to read [Who can text it](#who-can-text-it) before passing the
+number on.
 
-By WhatsApp:
-
-1. Ask a maintainer for the sandbox join code. It routes your messages to this
-   Twilio account, so it is shared deliberately rather than published here; see
-   [Who can text it](#who-can-text-it).
-2. From WhatsApp, send `join <code>` to **+1 415 523 8886**. It replies to
-   confirm. Any number of people can join the same sandbox with the same code,
-   and each session expires three days after joining, so a returning tester
-   sends `join <code>` again.
-3. Ask it something the site covers: "What is the SYNGAP1 ICD-10 code?", "How do
-   I start a fundraiser?", "What should I do if I need medical information?"
+The WhatsApp channel is wired up but has no sender: it needs an approved
+WhatsApp sender in the Messaging Service, and Twilio's shared sandbox cannot be
+one. See [Senders](#senders).
 
 What to expect:
 
@@ -70,23 +64,15 @@ What to expect:
 
 ### Who can text it
 
-The two channels gate access differently, and SMS barely gates it at all.
-
-The join code belongs to this Twilio account's sandbox, and the sandbox number
-is shared across every Twilio account: the code is what routes a message to this
-agent rather than someone else's. Anyone who has it can reach the agent, and what
-they say is retained (see [Memory](#memory)), which is why it is not in this
-file.
-
-Anyone with access to the Twilio account reads it off the **Try WhatsApp** page
-of the Console and needs nothing from anyone. Everybody else needs a maintainer
-to pass it on.
-
-The SMS number has no equivalent: anyone who knows it can text the agent, and
-what they say is retained the same way. Knowing the number is the whole of the
+Nothing gates it. Anyone who knows the number can text the agent, and what they
+say is retained (see [Memory](#memory)). Knowing the number is the whole of the
 access control, so who it is given to is the decision that matters — and it is
 the decision [Open decision 3](docs/decisions.md) says to settle before the
 number reaches real families.
+
+There used to be a second, narrower door: the WhatsApp sandbox's join code,
+which had to be passed on by a maintainer. That route is gone now that senders
+come from the Messaging Service, so the number is the only way in.
 
 ## Quickstart
 
@@ -129,40 +115,25 @@ Everything else in `.env` is either optional or created for you in step 4.
 
 ### 2. A sender
 
-WhatsApp through Twilio's sandbox is the fastest path, because it needs no
-Meta Business verification, no approved sender, and no carrier registration.
-`.env.example` ships configured for it.
+Senders live in a Messaging Service, and `TWILIO_MESSAGING_SERVICE_SID` is the
+only sender setting. `.env.example` ships CURE SYNGAP1's service, which already
+holds the verified toll-free SMS number, so **there is nothing to do here for
+SMS on a fresh checkout**.
 
-1. Open the **Try WhatsApp** page in the legacy Console:
-   <https://www.twilio.com/console/sms/whatsapp/sandbox>. Acknowledge the terms,
-   click **Confirm**, and note the join code.
+To use your own senders, create a Messaging Service, add senders to it under
+**Messaging → Services → Senders**, and put its SID in `.env`. See
+[Senders](#senders) for what provisioning does with it, and for why
+`TWILIO_PHONE_NUMBER` and `TWILIO_WHATSAPP_NUMBER` no longer do anything.
 
-   Do not use Messaging > Senders > WhatsApp Senders > Create new sender. That is
-   sender self-signup, which requires a Facebook login and a Meta Business
-   Portfolio, and takes weeks.
+WhatsApp needs an approved WhatsApp sender in that service. Twilio's shared
+WhatsApp sandbox cannot be one, so the sandbox is not a route to the WhatsApp
+channel; see [A WhatsApp sender of your own](#a-whatsapp-sender-of-your-own).
 
-2. From the phone you want to test with, send `join <code>` over WhatsApp to
-   **+1 415 523 8886**. It replies to confirm. That code is what routes your
-   messages to this Twilio account's sandbox.
-
-3. Leave `TWILIO_WHATSAPP_NUMBER=whatsapp:+14155238886` in `.env`.
-
-4. On that same Try WhatsApp page, set the sandbox's **Inbound URL** to
-   `https://<your-public-host>/whatsapp-sandbox-silence`. Left at its default,
-   the sandbox echoes "You said ..." to every user alongside the real answer.
-   That endpoint returns empty TwiML, which sends the user nothing.
-
-SMS needs nothing here: `.env.example` ships the toll-free number CURE SYNGAP1
-has already verified, so both channels are live on a fresh checkout. See
-[An SMS number](#an-sms-number) to point it at a different number, or
-[Sending through a Messaging Service](#sending-through-a-messaging-service) to
-send as a Messaging Service instead.
-
-At least one sender is required. Configuring both does not merge a contact's two
-threads: Conversation Memory keys a profile on the identifier type, so
-`whatsapp:+1...` under `whatsapp` and `+1...` under `phone` are two identifiers
-for one person, and the conversation grouping is per channel type as well. Someone
-who switches channels starts over.
+Running SMS and WhatsApp together does not merge a contact's two threads:
+Conversation Memory keys a profile on the identifier type, so `whatsapp:+1...`
+under `whatsapp` and `+1...` under `phone` are two identifiers for one person,
+and the conversation grouping is per channel type as well. Someone who switches
+channels starts over.
 
 ### 3. A public URL
 
@@ -215,7 +186,7 @@ Sent WHATSAPP response via Actions API [conversation_id=conv_conversation_..., t
 | `src/app/tools/escalation.py` | Sending an unanswered question to a person |
 | `src/app/data/kb_fixture.json` | Offline page summaries, for tests and credential-free runs |
 | `src/app/config.py` | Environment-derived settings |
-| `src/app/channels.py` | The SMS channel, sent as a Messaging Service |
+| `src/app/channels.py` | The SMS and WhatsApp channels, sent as a Messaging Service |
 | `render.yaml` | The deployed service definition, read by Render's Blueprints |
 | `prompts/system.md` | The live system prompt. Edit this file, not the code |
 | `scripts/provision.py` | Creates the Twilio resources, idempotently |
@@ -259,10 +230,8 @@ returns to Render with the repository now selectable.
 docker compose run --rm provision --webhook-domain <name>.onrender.com
 ```
 
-and the WhatsApp Sandbox Inbound URL, set to
-`https://<name>.onrender.com/whatsapp-sandbox-silence` at
-<https://www.twilio.com/console/sms/whatsapp/sandbox>. That field has no API, so
-it is a manual step every time the hostname changes.
+That is the only hostname-dependent step now: senders come from the Messaging
+Service, which holds no webhook of its own.
 
 **Changing an environment variable does not deploy.** Render stores the new
 value and the running instance keeps the old one until something deploys, so a
@@ -302,9 +271,9 @@ timeout is visible, so `--logs` is the deployed equivalent of
 
 **The serving command is not the Dockerfile's.** `render.yaml` sets
 `dockerCommand` to `uvicorn --factory app.main:create_app`, because the
-Dockerfile's `python -m app.main` serves TAC's app directly and so carries
-neither `/healthz` nor `/whatsapp-sandbox-silence`, both of which `create_app()`
-adds. It also binds `$PORT`, which is what Render routes to.
+Dockerfile's `python -m app.main` serves TAC's app directly and so carries no
+`/healthz`, which `create_app()` adds. It also binds `$PORT`, which is what
+Render routes to.
 
 **`/healthz` is the only route without a signature check.** Every other route
 validates a Twilio signature and would fail a health check that is not a signed
@@ -327,125 +296,99 @@ since this service keeps no state of its own: conversation history is
 in-process and rebuilt from the next message, and what persists lives in
 Twilio's Memory Store.
 
-## Moving off the sandbox
-
-The sandbox is a shared Twilio number with a join code, which makes it a testing
-tool rather than something to give families. Two things replace it, independently.
+## Adding a channel
 
 ### A WhatsApp sender of your own
 
+The WhatsApp channel is registered and idle: it receives nothing until the
+Messaging Service holds a WhatsApp sender, because provisioning writes no
+WhatsApp capture rules until then. Twilio's shared WhatsApp sandbox cannot be
+that sender — it is not this account's to add to a service — so the sandbox,
+which is how this channel was tested, is no longer a route to it.
+
 1. Get a Meta Business Portfolio verified and a WhatsApp sender approved for a
    Twilio number. Twilio's sender self-signup drives this, and it takes weeks
-   rather than minutes, which is the reason the sandbox exists.
-2. Set `TWILIO_WHATSAPP_NUMBER=whatsapp:+1<your number>` in `.env` and in the
-   Render service's environment.
-3. Re-run provisioning so the capture rules name the new sender:
+   rather than minutes.
+2. Add it to the Messaging Service under **Messaging → Services → Senders**.
+   Nothing goes in `.env`.
+3. Re-run provisioning so the capture rules pick it up:
 
    ```bash
    docker compose run --rm provision --webhook-domain curesyngap1-agent.onrender.com
    ```
 
-   It patches the Conversation Configuration in place, so it keeps its id.
-4. Deploy, because an environment variable alone does not:
-   `docker compose run --rm deploy`.
+   It prints the senders it found and patches the Conversation Configuration in
+   place, so the configuration keeps its id.
+4. Deploy: `docker compose run --rm deploy`.
 
-An approved sender needs no Inbound URL and no `/whatsapp-sandbox-silence`: that
-route exists only because the sandbox has its own echoing webhook. Leaving the
-route registered is harmless.
+An approved sender needs no Inbound URL of its own: the Messaging Service is
+where it lives, and the capture rules are what deliver its traffic here.
 
-### An SMS number
+### Senders
 
-CURE SYNGAP1's SMS sender is the toll-free number **+1 855 770 5019**, whose
-toll-free verification is approved. It is set as `TWILIO_PHONE_NUMBER` in
-`.env` and in `render.yaml`, so both channels are live and nothing has to be
-done to serve SMS on a fresh checkout.
+**Every sender lives in a Messaging Service, and `TWILIO_MESSAGING_SERVICE_SID`
+is the only sender configuration there is.** The agent sends as that service,
+and provisioning reads the service's **Senders** page — phone numbers, short
+codes, WhatsApp senders — to build the capture rules that decide what reaches
+the agent. So adding a sender is: add it to the service in the Console, re-run
+provisioning, deploy. Nothing is listed in `.env` or `render.yaml` that has to
+be kept in step with the service.
 
-To point the agent at a different number instead:
+CURE SYNGAP1's service is `MG81a3a0597d8befe7fb1b74732102b08a`, holding the
+toll-free number **+1 855 770 5019**, whose verification is approved. It is set
+in `.env.example` and `render.yaml`, so SMS is live on a fresh checkout.
 
-1. Buy an SMS-capable Twilio number. Messaging US numbers requires toll-free
-   verification or 10DLC registration first, which takes one to three weeks.
-2. Set `TWILIO_PHONE_NUMBER` to it in E.164 in `.env` and in `render.yaml`.
-   `build_server()` registers the SMS channel whenever that value starts with
-   `+`, so nothing else has to change for the agent to serve it. That key
-   carries a literal `value:` rather than `sync: false`, so
-   `deploy.py --sync-env` does not push it: it reaches the service through a
-   Blueprint sync or the Render dashboard.
+```bash
+docker compose run --rm provision --webhook-domain curesyngap1-agent.onrender.com
+```
 
-   Or set `TWILIO_MESSAGING_SERVICE_SID` to a Messaging Service instead and let
-   it pick the sender, which is the same two keys and one more decision; see
-   [Sending through a Messaging Service](#sending-through-a-messaging-service).
-3. Re-run provisioning and deploy, as above.
+It prints the senders it found, per channel, and those are exactly what the
+agent can be reached on. To see that without touching the account:
 
-Inbound SMS is captured by the Conversation Configuration's capture rules, so the
-number's own Messaging webhook stays empty. Leaving a webhook or an auto-replying
-Messaging Service on the number is what makes a family get two answers.
+```bash
+docker compose run --rm provision --webhook-domain curesyngap1-agent.onrender.com --dry-run
+```
+
+That reads the service, prints the capture rules it would write and what it
+would create or patch, and changes nothing — every request is checked before it
+leaves, so it cannot write even if a branch is wrong. It needs an API key
+already in `.env`, because minting one is itself a change.
+
+**Why a Messaging Service rather than a bare number.** It is a sender in its own
+right — the Messages API's `From` accepts a phone number, an Alphanumeric Sender
+ID **or** a Messaging Service SID — and sending as it applies Twilio's STOP/HELP
+keyword handling, which a bare number does not have. For a US 10DLC sender it is
+also where the campaign registration lives; that is not the case here, where the
+sender is toll-free, so opt-out handling is the reason that applies to this
+agent. The other reason is the one above: one SID instead of a sender variable
+per channel, with the service as the single place they are listed.
+
+**`TWILIO_PHONE_NUMBER` and `TWILIO_WHATSAPP_NUMBER` no longer do anything.**
+They configured the senders before this. Setting either changes no behaviour;
+they are absent from `render.yaml` on purpose.
+
+**The service must not have an inbound webhook or auto-reply of its own.** The
+capture rules deliver every inbound message to `/webhook` regardless, so
+whatever the service replies with reaches the contact alongside the agent's
+answer. Provisioning warns when it sees `inbound_request_url` set; clear it
+under **Messaging → Services → Integration**.
+
+**WhatsApp needs an approved sender in the service.** Twilio's shared WhatsApp
+sandbox sender cannot be one — it is not this account's to add — so the sandbox
+is no longer a way to run the WhatsApp channel. The channel is registered
+either way and simply receives nothing until the service holds a WhatsApp
+sender, because no capture rules exist for it. See
+[A WhatsApp sender of your own](#a-whatsapp-sender-of-your-own).
+
+**Alphanumeric Sender IDs are skipped.** They are send-only, so nothing arrives
+inbound on one and a capture rule for one would match nothing.
+
+### Giving the number out
 
 Giving the number out is what Decision 3 in [docs/decisions.md](docs/decisions.md)
 is gated on: with `MEMORY_MODE=always`, extraction is not selective, so a family
 describing seizures or medications has that retained. Settle that before the
 number goes anywhere public.
-
-### Sending through a Messaging Service
-
-This is optional, and off by default. SMS works without it, from the verified
-toll-free number above.
-
-A Messaging Service adds two things a bare number does not have: Twilio's
-STOP/HELP keyword handling, and a sender pool it draws from. For a US 10DLC
-sender it is also where the campaign registration lives — not the case here,
-where the sender is a toll-free number whose verification is already approved,
-so opt-out handling is the reason that applies to this agent.
-
-A Messaging Service is a sender in its own right: the Messages API's `From`
-accepts a phone number, an Alphanumeric Sender ID **or** a Messaging Service
-SID, and given the SID Twilio picks the number from the service's pool. So it
-serves SMS on its own, with no `TWILIO_PHONE_NUMBER` beside it:
-
-```bash
-# In .env and on the Render service, then re-provision and deploy.
-TWILIO_MESSAGING_SERVICE_SID=MG00000000000000000000000000000000
-```
-
-Set both and the service wins — it is the sender either way, and there is no
-second SMS channel. WhatsApp is untouched: the sandbox sender is in no service's
-pool.
-
-**Two things to settle before turning it on.** A Messaging Service with its own
-inbound webhook or auto-reply answers alongside the agent, which is the
-two-answers symptom above: capture rules deliver the message to `/webhook`
-regardless, so both reply. And the service picks the sender from its pool, so if
-the pool holds anything other than **+1 855 770 5019**, a family can get a reply
-from a number they were never given — the number this README publishes. Check
-the pool before switching; `provision.py` prints it.
-
-**Inbound still comes from the pool.** Capture rules match E.164 addresses, not
-service SIDs, so `provision.py` reads the service's sender pool and writes a
-capture rule for every number in it. That is what makes a family who texts any
-number in the pool reach the agent, and it is why provisioning calls the
-Messaging API at all. Adding a number to the pool later means re-running
-provisioning.
-
-**The agent's Conversation Orchestrator address is still a phone number.** CO
-creates the agent participant at the number the family texted, and
-`src/app/channels.py` reports that address so TAC's participant reconciliation
-finds it rather than adding a second participant. Only the reply's `From`
-carries the service SID.
-
-Leaving `TWILIO_MESSAGING_SERVICE_SID` empty keeps the previous behaviour —
-sending from `TWILIO_PHONE_NUMBER` directly — and logs a warning at startup
-saying so.
-
-**Unverified against a live account.** The Messages API documents a Messaging
-Service SID as a valid `From`, and Conversation Orchestrator's `from` takes an
-explicit `{address, channel}`, but whether CO forwards a non-E.164 address
-straight through rather than trying to resolve it to a participant has not been
-confirmed here — CO's own Channels reference says SMS addresses are E.164. If it
-turns out CO refuses it, the fallback is the other route to the same place: keep
-a pool number in `TWILIO_PHONE_NUMBER` as the `From` and pass the service in the
-action's `channelSettings` instead, as `messagingServiceSid`. That field is an
-open pass-through, and TAC's own `ActionChannelSettings` docstring names
-`messagingServiceSid` as an example of what belongs in it. In `channels.py` that
-is a change to `send_response` only.
 
 A family who texts after using WhatsApp starts over, because Conversation Memory
 keys a profile on the identifier type: `whatsapp:+1...` and `+1...` are two
@@ -460,18 +403,17 @@ Symptoms seen while getting this working end to end, and what each one means.
 | --- | --- |
 | `POST /webhook` returns 403 within a few ms | The auth token the service holds is not the one Twilio signs with. Compare lengths before contents: trailing whitespace in a `.env` value survives `docker --env-file` and makes a 32-character token 33. |
 | Messages arrive, no reply, no application log | Same 403. Twilio's delivery is fine and the request never reaches the callback. |
-| The user gets "You said ..." alongside the real answer | The WhatsApp Sandbox Inbound URL is still the stock Twilio Function every new sandbox ships with. Point it at `<host>/whatsapp-sandbox-silence`. |
 | Two replies to one message | A local container and the deployed service are both serving the same Conversation Configuration. Only one webhook host can be current. |
-| A texter gets the agent's answer plus a stock or canned one | The SMS number still has its own Messaging webhook, or belongs to a Messaging Service that replies. Capture rules deliver the message to `/webhook` either way, so both answer. Clear the number's messaging configuration in the Console. |
+| A texter gets the agent's answer plus a stock or canned one | The Messaging Service has an `inbound_request_url`, or the sender number has its own Messaging webhook. Capture rules deliver the message to `/webhook` either way, so both answer. Provisioning warns about the former; clear it under **Messaging → Services → Integration**. |
 | A corrected credential changes nothing | Render keeps the running instance until something deploys. Run `docker compose run --rm deploy`. |
 | One tester gets no replies while others are answered | They went over the rate limit: `RATE_LIMIT_MESSAGES` per minute per contact. The log says `Rate limit: ...`. It clears itself a minute after their last message. |
 | A message gets no reply at all, but the logs show `Sent WHATSAPP response` | The body was over Twilio's 1600-character limit, which Twilio rejects after accepting the send; the Console's Messaging logs show the failure. `Agent.respond()` now replaces any reply over `MAX_REPLY_CHARS` with a short one and logs a warning, so look for that line first. |
-| `GET /` returns 404 | Expected. The app registers `/webhook`, `/twiml`, `/ws`, `/healthz` and the sandbox silencer, and no root route. Use `/healthz`. |
+| `GET /` returns 404 | Expected. The app registers `/webhook`, `/twiml`, `/ws` and `/healthz`, and no root route. Use `/healthz`. |
 | The first message is slow or returns the fallback | The free instance spun down. See [The free plan sleeps](#the-free-plan-sleeps). |
 | The agent says it has no memory of earlier conversations | Look for a `Recall:` line in the logs. `observations=0` means retrieval found nothing; no line at all means recall was skipped or the contact has no profile yet. |
 | A sender set in `render.yaml` is still empty on the service | A literal `value:` in the blueprint is applied when Render creates the env var, not on every push, and `--sync-env` skips it because it is not `sync: false`. Read it back with `GET /v1/services/<id>/env-vars`, then set it with `PUT .../env-vars/<KEY>` or in the dashboard, and deploy. |
 | A deploy ends `update_failed` right after creation | The service started before its credentials existed. `build_server()` refuses to start without them, by design. Set them, then deploy. |
-| SMS gets no reply and the logs show `Failed to create action` | Conversation Orchestrator rejected the send. If the error names the `from` address, it did not accept the Messaging Service SID as a sender — see [Sending through a Messaging Service](#sending-through-a-messaging-service) for the fallback. |
+| SMS gets no reply and the logs show `Failed to create action` | Conversation Orchestrator rejected the send. If the error names the `from` address, it did not accept the Messaging Service SID as a sender — see [Senders](#senders); the fallback is to keep a pool number as the `From` and pass the service in the action's `channelSettings` instead. |
 | SMS gets no reply and the Console's Messaging logs show error 21704 | The Messaging Service's sender pool is empty, so Twilio has no number to send from. `provision.py` refuses to run in that state, so this means the pool was emptied afterwards. |
 | SMS replies are delivered but the recipient never sees them | Carrier filtering. Check the toll-free verification is still approved in the Console; for a 10DLC sender instead, check the campaign on its Messaging Service. The startup log says which of the two sender paths SMS is on. |
 

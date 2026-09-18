@@ -1,34 +1,38 @@
-"""The SMS channel, sending through a Messaging Service.
+"""Messaging channels that send as a Messaging Service.
 
-A Messaging Service adds Twilio's STOP/HELP keyword handling and a sender pool
-to draw from, and for a US 10DLC sender it is where the campaign registration
-lives. This agent's sender is a toll-free number whose verification is already
-approved, so opt-out handling is the part that applies to it.
+A Messaging Service is the sender. The Messages API's `From` accepts a
+Messaging Service SID in place of a phone number, an Alphanumeric Sender ID or
+a short code, and given the SID Twilio picks the sender from the service's own
+pool. So one SID replaces every per-channel sender in the environment, and the
+service's Senders page — phone numbers, short codes, alpha senders, WhatsApp,
+RCS — is the one place a sender is configured.
 
-`From` on the Messages API accepts a phone number, an Alphanumeric Sender ID or
-a Messaging Service SID, so naming the service as the sender is the whole of
-"send this through the service": Twilio picks a sender from the pool and applies
-the service's registration and opt-out handling. Nothing here needs a sender
-number of its own, which is why `TWILIO_PHONE_NUMBER` is optional once a service
-is configured.
+That is also what makes the sender config self-describing: adding a number to
+the service and re-provisioning is enough for it to reach the agent, because
+`scripts/provision.py` reads the service's senders and writes the Conversation
+Configuration's capture rules from them. Nothing here has to be told which
+numbers exist, and a channel whose service holds no sender simply never
+receives anything — there are no capture rules for it, so Conversation
+Orchestrator captures nothing to deliver.
 
 `send_response` is reimplemented rather than extended because TAC builds the
-action's `from` from the agent participant's id and offers no hook for the
-address — see `from_=ActionParticipantRef(...)` in `tac.channels.messaging`. The
-rest of the action is assembled the same way it is there, so this stays a small
-divergence, and it is the method to re-read after a TAC upgrade.
+SEND_MESSAGE action's `from` from the agent participant's id and offers no hook
+for the address — see `from_=ActionParticipantRef(...)` in
+`tac.channels.messaging`. The rest of the action is assembled the way TAC
+assembles it, so this stays a small divergence, and it is the method to re-read
+after a TAC upgrade.
 
-The inbound side is left alone. Conversation Orchestrator creates the agent
-participant at the pool number the family texted, and `get_agent_address`
-returns that address so TAC's participant reconciliation finds it rather than
-adding a second one. CO's SMS addresses are E.164 (see its Channels reference),
-so the service SID belongs on the send and not in the participant model.
+The inbound side stays address-based. Conversation Orchestrator creates the
+agent participant at the sender the contact actually messaged, and its SMS and
+WhatsApp addresses are E.164, so `get_agent_address` reports that address for
+participant reconciliation to match rather than adding a second participant.
+The service SID belongs on the send, not in the participant model.
 
-`MessagingChannel` is subclassed directly rather than `SMSChannel`, whose only
-additions are the three methods below and a constructor guard requiring
-`TWILIO_PHONE_NUMBER`. That guard is the thing being dropped, and inheriting it
-only to work around it would be worse than not inheriting it. The one thing left
-behind is `initiate_outbound_conversation`, which needs a sender number and
+`MessagingChannel` is subclassed directly rather than TAC's `SMSChannel` and
+`WhatsAppChannel`, whose only additions are the three methods here plus
+constructor guards requiring `TWILIO_PHONE_NUMBER` and `TWILIO_WHATSAPP_NUMBER`
+— those guards being the thing this removes. What is left behind is
+`initiate_outbound_conversation`, which needs a sender address of its own and
 which this app never calls.
 """
 
@@ -54,8 +58,12 @@ from tac.utils.redaction import mask_address
 MAX_CONVERSATIONS = 500
 
 
-class MessagingServiceSMSChannel(MessagingChannel):
-    """SMS, sent with a Messaging Service as the sender."""
+class MessagingServiceChannel(MessagingChannel):
+    """One messaging channel, sent with a Messaging Service as the sender."""
+
+    # The Conversation Orchestrator channel name. Set by each subclass; it is
+    # what TAC filters inbound webhooks on.
+    channel_name: str = ""
 
     def __init__(
         self,
@@ -65,51 +73,59 @@ class MessagingServiceSMSChannel(MessagingChannel):
         memory_mode: MemoryMode = "never",
     ) -> None:
         super().__init__(tac, dedup_capacity=dedup_capacity, memory_mode=memory_mode)
+        if not self.channel_name:
+            raise ValueError(f"{type(self).__name__} must set channel_name")
         self._messaging_service_sid = messaging_service_sid
         self._agent_addresses: dict[str, str] = {}
 
     def get_channel_name(self) -> str:
-        return "SMS"
+        return self.channel_name
 
     async def process_webhook(
         self, webhook_data: dict[str, Any], idempotency_token: str | None = None
     ) -> None:
-        """Note which of our numbers was texted, then handle the message.
+        """Note which of our senders was messaged, then handle the message.
 
         This runs before the base class, because the address is needed during
         the participant reconciliation the base class does on the way to the
         agent, not after it.
         """
-        self._remember_agent_address(webhook_data)
+        await self._remember_agent_address(webhook_data)
         await super().process_webhook(webhook_data, idempotency_token)
 
     def get_agent_address(self, conversation_id: str) -> ParticipantAddress:
-        """The agent's address in Conversation Orchestrator for this conversation.
+        """The agent's Conversation Orchestrator address for this conversation.
 
         This is what reconciliation matches the agent participant on, not what
-        the reply is sent from, so it is the pool number the family texted —
-        the address CO already created that participant at.
+        the reply is sent from, so it is the sender the contact messaged — the
+        address CO already created that participant at.
 
-        `TWILIO_PHONE_NUMBER` is the fallback for a conversation no inbound
-        message has arrived on, which is to say one this process started itself.
-        This app never starts one.
+        There is no configured sender to fall back to, by design: the Messaging
+        Service is the sender and it has no single address. So an unknown
+        conversation is an error rather than a guess. Reaching it means
+        something asked to reply to a conversation no inbound message arrived
+        on, which is an outbound-initiated conversation; this app starts none.
         """
-        address = self._agent_addresses.get(conversation_id) or self.tac.config.phone_number
-        return ParticipantAddress(channel=self.get_channel_name(), address=address)
+        address = self._agent_addresses.get(conversation_id)
+        if not address:
+            raise RuntimeError(
+                f"No agent address known for {self.channel_name} conversation "
+                f"{conversation_id}. It is learned from the inbound message that "
+                "opens a conversation, so either none arrived on this process or the "
+                "webhook carried no usable recipient."
+            )
+        return ParticipantAddress(channel=self.channel_name, address=address)
 
     def is_default_agent_address(self, author_address: str) -> bool:
         """Whether this address is one of ours, so its message is not answered.
 
-        A pool holds more than one number in general, and with a service there
-        may be no configured number at all, so the remembered addresses are the
-        ones that matter. Every one of them was the recipient of an inbound
-        message and so is ours; a family's address never reaches that dict.
-        Missing one costs a participant lookup over the API, which is TAC's
-        fallback check, rather than correctness.
+        A service's pool holds more than one sender in general, and there is no
+        configured sender to compare against, so the remembered addresses are
+        all there is. Every one of them was the recipient of an inbound message
+        and so is ours; a contact's address never reaches that dict. Missing one
+        costs a participant lookup over the API, which is TAC's fallback check,
+        rather than correctness.
         """
-        configured = self.tac.config.phone_number
-        if configured and author_address == configured:
-            return True
         return author_address in self._agent_addresses.values()
 
     async def send_response(
@@ -121,29 +137,28 @@ class MessagingServiceSMSChannel(MessagingChannel):
         """Send the reply with the Messaging Service as its sender.
 
         The same action TAC builds, with `from` naming the service instead of
-        the agent participant. Only the customer side is resolved by
-        participant id, which is what keeps the reply on the right thread.
+        the agent participant. Only the contact side is resolved by participant
+        id, which is what keeps the reply on the thread TAC reconciled.
 
         A failure is logged rather than raised, matching TAC: the callback has
         already produced an answer and there is nothing further to do with it.
         """
-        channel_name = self.get_channel_name()
         if not isinstance(response, str):
-            raise TypeError(f"{channel_name} channel only supports string responses")
+            raise TypeError(f"{self.channel_name} channel only supports string responses")
 
         session = self._conversations.get(conversation_id)
         if session is None or not session.author_info:
             raise RuntimeError(
-                f"Unable to send {channel_name} message: send_response called without a "
-                f"reconciled session for conversation {conversation_id}. Wait for an "
-                "inbound webhook first."
+                f"Unable to send {self.channel_name} message: send_response called "
+                f"without a reconciled session for conversation {conversation_id}. "
+                "Wait for an inbound webhook first."
             )
 
-        customer_participant_id = session.author_info.participant_id
-        if not customer_participant_id:
+        contact_participant_id = session.author_info.participant_id
+        if not contact_participant_id:
             raise RuntimeError(
-                f"Unable to send {channel_name} message: session for conversation "
-                f"{conversation_id} is missing the customer participant id."
+                f"Unable to send {self.channel_name} message: session for conversation "
+                f"{conversation_id} is missing the contact's participant id."
             )
 
         try:
@@ -152,13 +167,13 @@ class MessagingServiceSMSChannel(MessagingChannel):
                 SendMessageActionRequest(
                     payload=SendMessageActionPayload(
                         from_=ActionParticipantRef(
-                            channel=channel_name,
+                            channel=self.channel_name,
                             address=self._messaging_service_sid,
                         ),
                         to=[
                             ActionParticipantRef(
-                                channel=channel_name,
-                                participant_id=customer_participant_id,
+                                channel=self.channel_name,
+                                participant_id=contact_participant_id,
                             )
                         ],
                         content=ActionTextContent(text=response),
@@ -167,7 +182,7 @@ class MessagingServiceSMSChannel(MessagingChannel):
                 ),
             )
             self.logger.info(
-                f"Sent {channel_name} response via Actions API",
+                f"Sent {self.channel_name} response via Actions API",
                 conversation_id=conversation_id,
                 to_address=mask_address(session.author_info.address),
                 messaging_service_sid=self._messaging_service_sid,
@@ -180,21 +195,25 @@ class MessagingServiceSMSChannel(MessagingChannel):
                 exc_info=True,
             )
 
-    def _remember_agent_address(self, webhook_data: dict[str, Any]) -> None:
-        """Record which of our numbers an inbound message was addressed to.
+    async def _remember_agent_address(self, webhook_data: dict[str, Any]) -> None:
+        """Record which of our senders an inbound message was addressed to.
 
         Only an inbound message says anything about this. The capture rules
         cover both directions, so a reply the agent sent is captured too, and
-        it has our sender as its author and the family's number as its
+        it has our sender as its author and the contact's address as its
         recipient — reading the recipient off one of those would point
-        reconciliation at the family's own number. So an address is recorded
-        once, from the message that opened the conversation, and an event whose
-        author is already known to be ours is left alone. Every conversation
-        here starts with a family texting in; this app never initiates one.
+        reconciliation at the contact's own address.
 
-        Anything unexpected in the payload is left alone rather than guessed
-        at: `get_agent_address` falls back to the configured number, which is
-        the behaviour TAC has without this class.
+        Which direction an event is can't be read off the payload, so this asks
+        TAC's own `_is_own_message`. Its first tier compares the addresses
+        already remembered here, and its second asks Conversation Orchestrator
+        for the author participant's type, which is what catches a reply the
+        agent sent before this process started — after a restart there is
+        nothing remembered, and the next event on a live conversation may well
+        be that reply rather than a new inbound message. Getting it wrong there
+        is not recoverable: an address is recorded once and never overwritten,
+        so the conversation would reconcile against the contact's participant
+        for as long as it stays open.
         """
         if webhook_data.get("eventType") != "COMMUNICATION_CREATED":
             return
@@ -211,15 +230,18 @@ class MessagingServiceSMSChannel(MessagingChannel):
             return
 
         author = data.get("author")
-        author_address = author.get("address") if isinstance(author, dict) else None
-        if isinstance(author_address, str) and self.is_default_agent_address(author_address):
+        if not isinstance(author, dict) or not isinstance(author.get("address"), str):
+            return
+        if await self._is_own_message(
+            author["address"], conversation_id, author.get("participantId")
+        ):
             return
 
         for recipient in data.get("recipients") or []:
             if not isinstance(recipient, dict):
                 continue
             address = recipient.get("address")
-            if recipient.get("channel") != self.get_channel_name():
+            if recipient.get("channel") != self.channel_name:
                 continue
             if not isinstance(address, str) or not address:
                 continue
@@ -229,3 +251,20 @@ class MessagingServiceSMSChannel(MessagingChannel):
             while len(self._agent_addresses) > MAX_CONVERSATIONS:
                 self._agent_addresses.pop(next(iter(self._agent_addresses)))
             return
+
+
+class MessagingServiceSMSChannel(MessagingServiceChannel):
+    """SMS, sent as a Messaging Service."""
+
+    channel_name = "SMS"
+
+
+class MessagingServiceWhatsAppChannel(MessagingServiceChannel):
+    """WhatsApp, sent as a Messaging Service.
+
+    Needs an approved WhatsApp sender in the service's pool. Twilio's shared
+    WhatsApp sandbox sender cannot be one — it is not the account's to add — so
+    the sandbox is not a way to run this channel.
+    """
+
+    channel_name = "WHATSAPP"
