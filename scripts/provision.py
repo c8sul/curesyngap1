@@ -207,14 +207,19 @@ def _routing(channel_settings: dict[str, object]) -> dict[str, list[tuple[str, s
     server fills in fields this script does not send. Comparing only the
     channel names would miss a changed phone number, leaving the capture rules
     pointed at the previous one.
+
+    A channel with no capture rules routes nothing, so it is left out. The
+    server lists RCS and VOICE that way on every configuration, and counting
+    them would patch on every run.
     """
-    return {
+    routing = {
         channel: sorted(
             (rule.get("from", ""), rule.get("to", ""))
-            for rule in (settings or {}).get("captureRules", [])
+            for rule in (settings or {}).get("captureRules") or []
         )
         for channel, settings in channel_settings.items()
     }
+    return {channel: rules for channel, rules in routing.items() if rules}
 
 
 async def sync_configuration(
@@ -244,10 +249,11 @@ async def sync_configuration(
         patch["memoryExtractionEnabled"] = True
         changes.append("memory extraction on")
 
-    current_channels = current.get("channelSettings") or {}
-    if _routing(current_channels) != _routing(channel_settings):
+    current_routing = _routing(current.get("channelSettings") or {})
+    wanted_routing = _routing(channel_settings)
+    if current_routing != wanted_routing:
         patch["channelSettings"] = channel_settings
-        changes.append(f"channels {sorted(current_channels)} -> {sorted(channel_settings)}")
+        changes.append(f"channels {sorted(current_routing)} -> {sorted(wanted_routing)}")
 
     if not patch:
         return []

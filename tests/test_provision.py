@@ -229,6 +229,43 @@ def test_server_supplied_fields_do_not_count_as_a_difference():
     assert _routing(ours) == _routing(theirs)
 
 
+async def test_server_listed_channels_with_no_rules_are_not_patched():
+    """The server lists RCS and VOICE with no capture rules on every
+    configuration. They route nothing, so they are not a difference."""
+    current = _configuration()
+    current["channelSettings"] |= {
+        "RCS": {"captureRules": [], "statusTimeouts": {"closed": 15, "inactive": None}},
+        "VOICE": {"captureRules": [], "statusTimeouts": None},
+    }
+
+    changes, recorder = await _sync(
+        current,
+        webhook_url="https://host/webhook",
+        channel_settings=build_channel_settings(None, "whatsapp:+1"),
+    )
+
+    assert changes == []
+    assert "PATCH" not in recorder.methods()
+
+
+async def test_a_removed_sender_still_patches_the_capture_rules():
+    """Ignoring empty channels must not hide one that still routes a sender
+    this run no longer configures."""
+    current = _configuration()
+    current["channelSettings"]["SMS"] = {
+        "captureRules": [{"from": "*", "to": "+1"}, {"from": "+1", "to": "*"}]
+    }
+
+    changes, recorder = await _sync(
+        current,
+        webhook_url="https://host/webhook",
+        channel_settings=build_channel_settings(None, "whatsapp:+1"),
+    )
+
+    assert "PATCH" in recorder.methods()
+    assert changes == ["channels ['SMS', 'WHATSAPP'] -> ['WHATSAPP']"]
+
+
 # --- operation polling ---
 
 
