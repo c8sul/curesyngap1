@@ -14,20 +14,18 @@ import time
 from enum import Enum
 
 from dotenv import load_dotenv
-from fastapi import Response
 from openai import AsyncOpenAI
 from tac import TAC, TACConfig, get_logger
 from tac.adapters.openai import with_tac_memory
 from tac.channels.messaging import MessagingChannel
-from tac.channels.sms import SMSChannel
-from tac.channels.whatsapp import WhatsAppChannel
 from tac.models.session import ConversationSession
 from tac.models.tac import TACMemoryResponse
 from tac.server import TACFastAPIServer
 from tac.utils.redaction import mask_address
 
 from app.agent import Agent
-from app.config import TAC_REQUIRED_ENV, AgentSettings, missing_env
+from app.channels import MessagingServiceSMSChannel, MessagingServiceWhatsAppChannel
+from app.config import TAC_REQUIRED_ENV, AgentSettings, messaging_service_sid, missing_env
 from app.memory import resolve_profile_id
 from app.prompt import RATE_LIMITED_REPLY, load_system_prompt
 from app.tools.escalation import EscalationContext, LoggingEscalation
@@ -59,10 +57,6 @@ MAX_INBOUND_CHARS = 2000
 # under it.
 RATE_LIMIT_MESSAGES = 12
 RATE_LIMIT_WINDOW_SECONDS = 60.0
-
-
-# Empty TwiML: a well-formed reply that sends the user nothing.
-SILENT_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
 
 
 class Allowance(Enum):
@@ -128,15 +122,6 @@ def create_app() -> object:
     """The FastAPI app, for `uvicorn --factory app.main:create_app`."""
     server = build_server()
 
-    # The WhatsApp sandbox has its own Inbound URL, separate from the
-    # Conversation Configuration's status callback. Left at its default it
-    # echoes "You said ..." to the user on every message, alongside the real
-    # answer. Pointing it here silences it, while Conversation Orchestrator
-    # continues to deliver the message to /webhook for the agent to handle.
-    @server.app.post("/whatsapp-sandbox-silence")
-    async def whatsapp_sandbox_silence() -> Response:
-        return Response(content=SILENT_TWIML, media_type="application/xml")
-
     # Liveness for a platform health check. Every other route requires a valid
     # Twilio signature, so none of them can serve as one. Reaching this means
     # the process started and `build_server()` found its configuration, which
@@ -158,9 +143,21 @@ def build_server() -> TACFastAPIServer:
             + ". Copy .env.example to .env and fill it in."
         )
 
-    # TACConfig reads this key unconditionally, including when only WhatsApp is
-    # in use and there is no SMS number to name.
+    # TACConfig reads this key unconditionally even though no sender is named
+    # in the environment any more, so it has to be present as an empty string
+    # rather than absent. Nothing reads the value.
     os.environ.setdefault("TWILIO_PHONE_NUMBER", "")
+
+    # The one piece of sender configuration. Read up front, with the rest of
+    # the startup checks, so a missing or malformed SID fails the deploy rather
+    # than the first reply.
+    service_sid = messaging_service_sid()
+    if not service_sid:
+        raise RuntimeError(
+            "TWILIO_MESSAGING_SERVICE_SID is not set, so there is no sender. Every "
+            "sender lives in a Messaging Service's pool — see its Senders page in "
+            "the Console — and that SID is what this app sends as."
+        )
 
     settings = AgentSettings.from_env()
     tac = TAC(config=TACConfig.from_env())
@@ -257,26 +254,26 @@ def build_server() -> TACFastAPIServer:
 
     tac.on_message_ready(handle_message_ready)
 
-    # Each channel is registered only when its sender is configured. The
-    # WhatsApp sandbox needs no Meta verification, so WhatsApp alone is a
-    # working setup while carrier registration for SMS is still pending.
+    # Both channels are registered unconditionally, because the Messaging
+    # Service decides what each one actually serves. A channel is only ever
+    # reached by traffic the Conversation Configuration captured, and
+    # `provision.py` builds those capture rules from the service's own senders
+    # — so a channel whose service holds no sender for it has no capture rules
+    # and never receives anything. Registering it costs nothing and means
+    # adding a sender to the service is the only step to serve a new channel.
     #
     # The channels keep TAC's default `memory_mode` of "never", so TAC does no
     # retrieval of its own: `_recall` does it, because resolving a WhatsApp
     # contact's profile needs an identifier type TAC does not derive. Leaving
     # both on would spend a failing lookup on every message.
-    channels: list[MessagingChannel] = []
-    if (os.environ.get("TWILIO_PHONE_NUMBER") or "").strip().startswith("+"):
-        channels.append(SMSChannel(tac))
-    if os.environ.get("TWILIO_WHATSAPP_NUMBER"):
-        channels.append(WhatsAppChannel(tac))
-
-    if not channels:
-        raise RuntimeError(
-            "No messaging channel is configured. Set TWILIO_PHONE_NUMBER to an "
-            "E.164 number for SMS, TWILIO_WHATSAPP_NUMBER for WhatsApp, or both."
-        )
-    logger.info(f"Channels: {', '.join(channel.get_channel_name() for channel in channels)}")
+    channels: list[MessagingChannel] = [
+        MessagingServiceSMSChannel(tac, service_sid),
+        MessagingServiceWhatsAppChannel(tac, service_sid),
+    ]
+    logger.info(
+        f"Channels: {', '.join(channel.get_channel_name() for channel in channels)}, "
+        f"sending as Messaging Service {service_sid}"
+    )
 
     return TACFastAPIServer(tac=tac, messaging_channels=channels)
 

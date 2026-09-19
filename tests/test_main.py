@@ -25,8 +25,10 @@ ENV = {
     "TWILIO_API_SECRET": "secret",
     "OPENAI_API_KEY": "sk-test",
     "TWILIO_CONVERSATION_CONFIGURATION_ID": "conv_configuration_1",
-    "TWILIO_WHATSAPP_NUMBER": "whatsapp:+14155238886",
+    "TWILIO_MESSAGING_SERVICE_SID": "MG" + "0" * 32,
 }
+
+SERVICE_SID = ENV["TWILIO_MESSAGING_SERVICE_SID"]
 
 
 @dataclass
@@ -84,6 +86,7 @@ class FakeServer:
 class FakeChannel:
     tac: object
     name: str = "STUB"
+    messaging_service_sid: str | None = None
 
     def get_channel_name(self) -> str:
         return self.name
@@ -114,15 +117,23 @@ def wired(monkeypatch):
 
     for key, value in ENV.items():
         monkeypatch.setenv(key, value)
-    for key in ("TWILIO_PHONE_NUMBER", "TWILIO_KNOWLEDGE_BASE_ID"):
+    for key in ("TWILIO_PHONE_NUMBER", "TWILIO_WHATSAPP_NUMBER", "TWILIO_KNOWLEDGE_BASE_ID"):
         monkeypatch.delenv(key, raising=False)
 
     monkeypatch.setattr(main, "TAC", lambda config: tac)
     monkeypatch.setattr(main.TACConfig, "from_env", classmethod(lambda cls: object()))
     monkeypatch.setattr(main, "AsyncOpenAI", lambda: client)
     monkeypatch.setattr(main, "TACFastAPIServer", FakeServer)
-    monkeypatch.setattr(main, "SMSChannel", lambda tac: FakeChannel(tac, "SMS"))
-    monkeypatch.setattr(main, "WhatsAppChannel", lambda tac: FakeChannel(tac, "WHATSAPP"))
+    monkeypatch.setattr(
+        main,
+        "MessagingServiceSMSChannel",
+        lambda tac, service_sid: FakeChannel(tac, "SMS", service_sid),
+    )
+    monkeypatch.setattr(
+        main,
+        "MessagingServiceWhatsAppChannel",
+        lambda tac, service_sid: FakeChannel(tac, "WHATSAPP", service_sid),
+    )
     monkeypatch.setattr(main, "with_tac_memory", lambda client, memory, context: client)
     monkeypatch.setattr(main, "HISTORIES", {})
     return tac, client
@@ -148,41 +159,55 @@ def test_an_absent_conversation_configuration_is_refused(wired):
         main.build_server()
 
 
-def test_no_configured_sender_is_refused(monkeypatch, wired):
-    monkeypatch.delenv("TWILIO_WHATSAPP_NUMBER")
+def test_an_absent_messaging_service_is_refused(monkeypatch, wired):
+    """The service is the only sender configuration, so without it there is
+    nothing to send as and no senders to have captured anything."""
+    monkeypatch.delenv("TWILIO_MESSAGING_SERVICE_SID")
 
-    with pytest.raises(RuntimeError, match="No messaging channel"):
+    with pytest.raises(RuntimeError, match="TWILIO_MESSAGING_SERVICE_SID is not set"):
+        main.build_server()
+
+
+@pytest.mark.parametrize("value", ["MG123", "SK" + "0" * 32, "not-a-sid", "MG" + "z" * 32])
+def test_a_malformed_messaging_service_sid_is_refused_at_startup(monkeypatch, wired, value):
+    """Twilio accepts a send naming a service that does not exist and drops it
+    afterwards, so nothing would report this back to the contact."""
+    monkeypatch.setenv("TWILIO_MESSAGING_SERVICE_SID", value)
+
+    with pytest.raises(RuntimeError, match="TWILIO_MESSAGING_SERVICE_SID"):
         main.build_server()
 
 
 # --- channel registration ---
 
 
-def test_whatsapp_alone_is_a_working_setup(wired):
-    """The WhatsApp sandbox needs no carrier registration, so WhatsApp without
-    an SMS number has to be servable."""
+def test_both_channels_are_registered_and_send_as_the_service(wired):
+    """What a channel actually serves is decided by the service's senders, via
+    the capture rules provisioning writes from them — so registering both costs
+    nothing and a channel with no sender simply never receives anything."""
     server = main.build_server()
 
-    assert [channel.name for channel in server.messaging_channels] == ["WHATSAPP"]
+    assert [channel.name for channel in server.messaging_channels] == ["SMS", "WHATSAPP"]
+    assert {channel.messaging_service_sid for channel in server.messaging_channels} == {
+        SERVICE_SID
+    }
 
 
-def test_an_sms_number_registers_the_sms_channel(monkeypatch, wired):
-    monkeypatch.setenv("TWILIO_PHONE_NUMBER", "+15550100")
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("TWILIO_PHONE_NUMBER", "+15550100"),
+        ("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886"),
+    ],
+)
+def test_a_sender_left_in_the_environment_changes_nothing(monkeypatch, wired, key, value):
+    """These used to configure the senders. Now the service does, so a stale
+    value has to be inert rather than quietly registering a second channel."""
+    monkeypatch.setenv(key, value)
 
     server = main.build_server()
 
     assert [channel.name for channel in server.messaging_channels] == ["SMS", "WHATSAPP"]
-
-
-@pytest.mark.parametrize("value", ["", "   ", "not-a-number", "15550100"])
-def test_a_phone_number_that_is_not_e164_registers_no_sms_channel(monkeypatch, wired, value):
-    """TACConfig reads TWILIO_PHONE_NUMBER unconditionally, so it is present and
-    empty in a WhatsApp-only setup; a placeholder must not register SMS."""
-    monkeypatch.setenv("TWILIO_PHONE_NUMBER", value)
-
-    server = main.build_server()
-
-    assert [channel.name for channel in server.messaging_channels] == ["WHATSAPP"]
 
 
 async def test_what_is_remembered_reaches_the_model(wired):
@@ -469,14 +494,3 @@ def test_the_health_check_answers_without_a_twilio_signature(wired):
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
-
-def test_the_sandbox_silencer_returns_empty_twiml(wired):
-    """The WhatsApp sandbox echoes "You said ..." at the user unless its
-    Inbound URL is answered with a well-formed, empty TwiML document."""
-    client = TestClient(main.create_app())
-
-    response = client.post("/whatsapp-sandbox-silence")
-
-    assert response.status_code == 200
-    assert "<Response></Response>" in response.text
-    assert "You said" not in response.text

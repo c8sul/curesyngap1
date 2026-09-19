@@ -1,6 +1,7 @@
 """Application settings read from the environment."""
 
 import os
+import re
 from dataclasses import dataclass
 
 # Twilio credentials consumed by TACConfig.from_env(). TWILIO_PHONE_NUMBER is
@@ -13,6 +14,32 @@ TAC_REQUIRED_ENV = (
     "TWILIO_API_KEY",
     "TWILIO_API_SECRET",
 )
+
+MESSAGING_SERVICE_SID = re.compile(r"^MG[0-9a-fA-F]{32}$")
+
+
+def messaging_service_sid() -> str | None:
+    """The Messaging Service to route SMS through, or None to send from the number.
+
+    A Messaging Service adds Twilio's STOP/HELP keyword handling and a sender
+    pool to draw from, and for a US 10DLC sender it is where the campaign
+    registration lives. Optional: SMS serves from a bare `TWILIO_PHONE_NUMBER`
+    without it, which is how the verified toll-free sender runs today.
+    WhatsApp is unaffected either way: the sandbox sender is in no service's pool.
+
+    A malformed value is refused rather than ignored. Twilio rejects a send
+    naming a service that does not exist, and it does so after accepting the
+    request, so nothing reports the failure back and the family gets no reply.
+    """
+    sid = (os.environ.get("TWILIO_MESSAGING_SERVICE_SID") or "").strip()
+    if not sid:
+        return None
+    if not MESSAGING_SERVICE_SID.match(sid):
+        raise RuntimeError(
+            f"TWILIO_MESSAGING_SERVICE_SID is {sid!r}; it must be a Messaging Service "
+            "SID, which is MG followed by 32 hex characters."
+        )
+    return sid
 
 
 @dataclass(frozen=True)
