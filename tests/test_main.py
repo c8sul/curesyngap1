@@ -42,6 +42,14 @@ class FakeMemoryClient:
         self.tac.lookups.append((id_type, value))
         return FakeProfileLookup([self.tac.profile_id] if self.tac.profile_id else [])
 
+    async def get_profile(self, profile_id: str, trait_groups=None) -> "FakeProfile":
+        return FakeProfile(self.tac.stored_traits)
+
+
+@dataclass
+class FakeProfile:
+    traits: dict
+
 
 @dataclass
 class FakeTAC:
@@ -49,6 +57,10 @@ class FakeTAC:
 
     orchestrator_enabled: bool = True
     callback: Any = None
+    ended_callback: Any = None
+    stored_traits: dict = field(default_factory=dict)
+    patches: list = field(default_factory=list)
+    injected_options: list = field(default_factory=list)
     profile_id: str | None = "mem_profile_1"
     recall_error: Exception | None = None
     lookups: list = field(default_factory=list)
@@ -63,6 +75,9 @@ class FakeTAC:
 
     def on_message_ready(self, callback: Any) -> None:
         self.callback = callback
+
+    def on_conversation_ended(self, callback: Any) -> None:
+        self.ended_callback = callback
 
     async def retrieve_memory(self, context, query=None, conversation_id=None):
         if self.recall_error:
@@ -123,8 +138,17 @@ def wired(monkeypatch):
     monkeypatch.setattr(main, "TACFastAPIServer", FakeServer)
     monkeypatch.setattr(main, "SMSChannel", lambda tac: FakeChannel(tac, "SMS"))
     monkeypatch.setattr(main, "WhatsAppChannel", lambda tac: FakeChannel(tac, "WHATSAPP"))
-    monkeypatch.setattr(main, "with_tac_memory", lambda client, memory, context: client)
+
+    def fake_with_tac_memory(client, memory, context, options=None):
+        tac.injected_options.append(options)
+        return client
+
+    async def fake_patch_traits(memory_client, profile_id, traits):
+        tac.patches.append((profile_id, traits))
+
+    monkeypatch.setattr(main, "with_tac_memory", fake_with_tac_memory)
     monkeypatch.setattr(main, "HISTORIES", {})
+    monkeypatch.setattr(main, "patch_traits", fake_patch_traits)
     return tac, client
 
 
@@ -431,6 +455,141 @@ async def test_a_conversation_with_no_author_survives_a_missing_address(wired):
     main.build_server()
 
     assert await tac.callback("hi", FakeSession(author_info=None), None) == "ok"
+
+
+# --- traits written when a conversation closes ---
+
+CLASSIFIED = '{"role": "parent_caregiver", "topics": ["fundraising"], "preferred_language": "en"}'
+
+
+async def test_the_prompt_sees_interests_but_not_engagement(wired):
+    """Engagement counters are for staff; the model gets Contact and Interests."""
+    tac, client = wired
+    client.turns = [FakeMessage(content="ok")]
+    main.build_server()
+
+    await tac.callback("hi", FakeSession(), None)
+
+    assert tac.injected_options[0].get_profile_traits() == ["Contact", "Interests"]
+
+
+async def test_a_closed_conversation_writes_both_trait_groups(wired):
+    tac, client = wired
+    client.turns = [FakeMessage(content="ok"), FakeMessage(content=CLASSIFIED)]
+    main.build_server()
+    session = FakeSession()
+    await tac.callback("how do I fundraise?", session, None)
+
+    await tac.ended_callback(session)
+
+    [(profile_id, traits)] = tac.patches
+    assert profile_id == "mem_profile_1"
+    assert traits["Engagement"]["conversationCount"] == 1
+    assert traits["Engagement"]["lastChannel"] == "WHATSAPP"
+    assert traits["Interests"] == {
+        "role": "parent_caregiver",
+        "topics": ["fundraising"],
+        "preferredLanguage": "en",
+    }
+
+
+async def test_the_classifier_is_constrained_to_a_strict_schema(wired):
+    """The schema is what keeps free text, and so health details, out."""
+    tac, client = wired
+    client.turns = [FakeMessage(content="ok"), FakeMessage(content=CLASSIFIED)]
+    main.build_server()
+    session = FakeSession()
+    await tac.callback("hi", session, None)
+
+    await tac.ended_callback(session)
+
+    response_format = client.calls[-1]["response_format"]
+    assert response_format["json_schema"]["strict"] is True
+
+
+async def test_a_closed_conversation_drops_its_history(wired):
+    tac, client = wired
+    client.turns = [FakeMessage(content="ok"), FakeMessage(content=CLASSIFIED)]
+    main.build_server()
+    session = FakeSession()
+    await tac.callback("hi", session, None)
+
+    await tac.ended_callback(session)
+
+    assert session.conversation_id not in main.HISTORIES
+
+
+async def test_a_conversation_this_process_never_saw_writes_only_engagement(wired):
+    """After a restart there is no history to classify, and no model call."""
+    tac, client = wired
+    main.build_server()
+
+    await tac.ended_callback(FakeSession())
+
+    [(_, traits)] = tac.patches
+    assert list(traits) == ["Engagement"]
+    assert client.calls == []
+
+
+async def test_nothing_is_written_for_a_contact_with_no_profile(wired):
+    tac, _ = wired
+    tac.profile_id = None
+    main.build_server()
+
+    await tac.ended_callback(FakeSession())
+
+    assert tac.patches == []
+
+
+async def test_traits_can_be_turned_off(monkeypatch, wired):
+    tac, _ = wired
+    monkeypatch.setenv("PROFILE_TRAITS", "off")
+    main.build_server()
+
+    await tac.ended_callback(FakeSession())
+
+    assert tac.patches == []
+
+
+async def test_engagement_only_skips_the_model_call(monkeypatch, wired):
+    tac, client = wired
+    monkeypatch.setenv("PROFILE_TRAITS", "engagement")
+    client.turns = [FakeMessage(content="ok")]
+    main.build_server()
+    session = FakeSession()
+    await tac.callback("hi", session, None)
+
+    await tac.ended_callback(session)
+
+    [(_, traits)] = tac.patches
+    assert list(traits) == ["Engagement"]
+    assert len(client.calls) == 1
+
+
+async def test_a_failed_classification_still_writes_engagement(wired):
+    tac, client = wired
+    client.turns = [FakeMessage(content="ok"), FakeMessage(content="not json")]
+    main.build_server()
+    session = FakeSession()
+    await tac.callback("hi", session, None)
+
+    await tac.ended_callback(session)
+
+    [(_, traits)] = tac.patches
+    assert list(traits) == ["Engagement"]
+
+
+async def test_a_failing_write_is_swallowed(monkeypatch, wired):
+    """A trait not written costs a report, never an exception out of TAC."""
+    tac, _ = wired
+    main.build_server()
+
+    async def failing_patch(*args):
+        raise RuntimeError("memory is down")
+
+    monkeypatch.setattr(main, "patch_traits", failing_patch)
+
+    await tac.ended_callback(FakeSession())
 
 
 # --- the transcript handed to a human ---

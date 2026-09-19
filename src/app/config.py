@@ -26,6 +26,7 @@ class AgentSettings:
     min_knowledge_score: float
     memory_mode: str
     reasoning_effort: str | None
+    profile_traits: str = "all"
 
     @classmethod
     def from_env(cls) -> "AgentSettings":
@@ -46,6 +47,10 @@ class AgentSettings:
             # "never" turns recall off. What may be retained about a family is
             # an open decision; see docs/decisions.md.
             memory_mode=os.environ.get("MEMORY_MODE", "always"),
+            # Which trait groups are written when a conversation closes: "all",
+            # "engagement" (counters only, no model call), or "off". See
+            # app.traits.
+            profile_traits=os.environ.get("PROFILE_TRAITS", "all"),
         )
 
 

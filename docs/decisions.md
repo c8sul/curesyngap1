@@ -147,7 +147,11 @@ anything being listed in the configuration's `intelligenceConfigurationIds`.
 
 Three kinds of memory are therefore written and read back:
 
-- **Traits.** The contact address, keyed by identifier type.
+- **Traits.** The contact address, keyed by identifier type, plus the
+  `Engagement` and `Interests` groups the app writes when a conversation closes
+  (`src/app/traits.py`). These are declared on the store with types and
+  validation rules and filled only from fixed, non-clinical vocabularies, so
+  they are not what this decision is about. `PROFILE_TRAITS=off` stops them.
 - **Observations.** Short statements about the person, each carrying a `source`
   of `intelligence_operatorresult_...`.
 - **Conversation summaries.** A paragraph per closed conversation, describing
