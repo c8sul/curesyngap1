@@ -186,7 +186,8 @@ docker compose run --rm provision --webhook-domain <your-public-host>
 ```
 
 Pass the host only, with no scheme and no path. The script creates, or reuses, a
-scoped API key, a Memory Store, and a Conversation Configuration, then prints the
+scoped API key, a Memory Store with the `Engagement` and `Interests` trait groups
+declared on it, and a Conversation Configuration, then prints the
 `.env` lines to save. Re-running is safe: it reuses what already exists and
 patches the configuration in place, so changing `--webhook-domain` or adding a
 sender keeps the same configuration id.
@@ -437,7 +438,7 @@ setting a deployment should want to differ on.
 | `MAX_REPLY_CHARS` (1500) | Twilio rejects a body over 1600 characters *after* accepting the send, so an oversized reply reaches nobody and reports nothing. Over this, the family gets a short reply instead. |
 | `MAX_INBOUND_CHARS` (2000) | Whatever is sent is what the model reads. Longer costs tokens and is where an injection attempt would hide. |
 | `RATE_LIMIT_MESSAGES` (12/minute, per contact) | One sender cannot spend an OpenAI call per message. The contact is told once, then not answered until the window rolls. In-process, so it is per replica. |
-| `MAX_CONVERSATIONS` (500) | Nothing tells this module a conversation closed, so the oldest are dropped rather than kept for the life of the process. |
+| `MAX_CONVERSATIONS` (500) | A conversation's history is dropped when TAC reports it closed, but that report never arrives for one that closes across a restart, so the oldest are dropped rather than kept for the life of the process. |
 | `MAX_HISTORY_MESSAGES` (40) | The turns of one conversation sent back to the model. |
 | `LOGGED_CHARS` (200) | How much of a family's question reaches a log line. A question can itself be a health detail; an escalation's transport still gets the whole text. |
 
@@ -549,6 +550,40 @@ Two things are worth knowing before reading the output:
 - **`GET /Profiles/{id}` returns traits only.** Observations and summaries come
   back from `/Recall`, so a profile that looks empty may not be. That is why the
   check uses recall rather than the profile read alone.
+
+### Traits written when a conversation closes
+
+When Conversation Orchestrator closes a conversation, `src/app/traits.py` writes
+two trait groups to the contact's profile. Unlike observations and summaries,
+every trait is declared on the Memory Store with a type and a validation rule,
+so only what is listed here can be stored.
+
+| Group | Traits | Written by | In the prompt |
+| --- | --- | --- | --- |
+| `Engagement` | `conversationCount`, `firstContactAt`, `lastContactAt`, `lastChannel`, `lastConversationId`, `escalationCount`, `lastEscalatedAt` | The app, from what it already knows | No |
+| `Interests` | `role`, `topics`, `preferredLanguage` | One model call per conversation, limited to fixed vocabularies by a strict JSON schema | Yes |
+
+`role` is one of `parent_caregiver`, `family_member`, `clinician`, `researcher`,
+`donor_supporter`, `other` or `unknown`, and `unknown` never replaces a known
+value. `topics` accumulates across conversations from `research`,
+`clinical_trials`, `family_support`, `getting_started`, `events`, `fundraising`,
+`donating`, `advocacy` and `other`. Nothing about the child and no email
+address is stored: the schema has nowhere to put them, and anything outside the
+vocabularies is dropped before the write.
+
+`PROFILE_TRAITS` controls it: `all` (the default), `engagement` for the
+counters alone with no model call, or `off`.
+
+It is best effort. TAC reports a close only for conversations it still holds in
+memory, so one that closes while the free instance is asleep, or across a
+redeploy, writes nothing and `conversationCount` undercounts. A write that fails
+is logged as `Traits: writing failed` and never affects a reply. A successful
+one logs `Traits: profile=...` with the names of the traits written.
+
+The groups must exist on the store before the app can write them; the profile
+PATCH refuses undeclared traits. Provisioning declares them, and re-running it
+adds any trait added to `TRAIT_GROUPS` since. A trait cannot move between
+groups once written, so treat the names as permanent.
 
 ### Retention is not settled
 

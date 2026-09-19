@@ -2,12 +2,14 @@
 
     docker compose run --rm provision --webhook-domain <public-host>
 
-Ensures three things exist and prints the `.env` lines for them:
+Ensures four things exist and prints the `.env` lines for them:
 
 1. A scoped API key and secret. Every other call here, and the application
    itself, authenticates with the key rather than the Auth Token.
 2. A Memory Store, which holds profiles and conversation memory.
-3. A Conversation Configuration bound to that store, with memory extraction on,
+3. The `Engagement` and `Interests` trait groups on that store, which the app
+   writes when a conversation closes. Their definitions live in `app.traits`.
+4. A Conversation Configuration bound to that store, with memory extraction on,
    capture rules for whichever senders are configured, and a status callback at
    `<domain>/webhook`.
    Set `TWILIO_PHONE_NUMBER` for SMS, `TWILIO_WHATSAPP_NUMBER` for WhatsApp, or
@@ -34,6 +36,8 @@ import sys
 
 import httpx
 from dotenv import load_dotenv
+
+from app.traits import TRAIT_GROUPS
 
 CLASSIC_API = "https://api.twilio.com/2010-04-01"
 MEMORY_API = "https://memory.twilio.com/v1/ControlPlane"
@@ -122,6 +126,57 @@ async def ensure_memory_store(
     return await create_memory_store(client, auth, name), True
 
 
+async def ensure_trait_groups(
+    client: httpx.AsyncClient,
+    auth: str,
+    store_id: str,
+    groups: dict[str, dict[str, object]] = TRAIT_GROUPS,
+) -> list[str]:
+    """Declare `groups` on the store, adding only what is missing.
+
+    A profile PATCH is refused for a trait the store does not declare, so this
+    has to run before the app writes any. A missing group is created; a group
+    missing some traits is patched with just those, which the API merges.
+    Existing trait definitions are never changed or removed here: a trait's
+    stored values outlive a change to its definition. Returns what changed.
+    """
+    url = f"{MEMORY_API}/Stores/{store_id}/TraitGroups"
+    body = _json_or_raise(
+        await client.get(url, headers={"Authorization": auth}, params={"includeTraits": "true"}),
+        "trait group list",
+    )
+    current = {
+        item.get("displayName"): item.get("traits") or {}
+        for item in _items(body)
+        if isinstance(item, dict)
+    }
+
+    changes: list[str] = []
+    for name, group in groups.items():
+        traits = group["traits"]
+        if name not in current:
+            response = await client.post(
+                url,
+                headers={"Authorization": auth, "Content-Type": "application/json"},
+                json={"displayName": name, **group},
+            )
+            changes.append(f"trait group {name} created")
+        else:
+            missing = {key: value for key, value in traits.items() if key not in current[name]}
+            if not missing:
+                continue
+            response = await client.patch(
+                f"{url}/{name}",
+                headers={"Authorization": auth, "Content-Type": "application/json"},
+                json={"traits": missing},
+            )
+            changes.append(f"trait group {name} gained {', '.join(sorted(missing))}")
+        result = _json_or_raise(response, f"trait group {name}")
+        if response.status_code == 202 and result.get("statusUrl"):
+            await poll_operation(client, result["statusUrl"], auth)
+    return changes
+
+
 async def ensure_conversation_configuration(
     client: httpx.AsyncClient,
     auth: str,
@@ -152,14 +207,19 @@ def _routing(channel_settings: dict[str, object]) -> dict[str, list[tuple[str, s
     server fills in fields this script does not send. Comparing only the
     channel names would miss a changed phone number, leaving the capture rules
     pointed at the previous one.
+
+    A channel with no capture rules routes nothing, so it is left out. The
+    server lists RCS and VOICE that way on every configuration, and counting
+    them would patch on every run.
     """
-    return {
+    routing = {
         channel: sorted(
             (rule.get("from", ""), rule.get("to", ""))
-            for rule in (settings or {}).get("captureRules", [])
+            for rule in (settings or {}).get("captureRules") or []
         )
         for channel, settings in channel_settings.items()
     }
+    return {channel: rules for channel, rules in routing.items() if rules}
 
 
 async def sync_configuration(
@@ -189,10 +249,11 @@ async def sync_configuration(
         patch["memoryExtractionEnabled"] = True
         changes.append("memory extraction on")
 
-    current_channels = current.get("channelSettings") or {}
-    if _routing(current_channels) != _routing(channel_settings):
+    current_routing = _routing(current.get("channelSettings") or {})
+    wanted_routing = _routing(channel_settings)
+    if current_routing != wanted_routing:
         patch["channelSettings"] = channel_settings
-        changes.append(f"channels {sorted(current_channels)} -> {sorted(channel_settings)}")
+        changes.append(f"channels {sorted(current_routing)} -> {sorted(wanted_routing)}")
 
     if not patch:
         return []
@@ -491,6 +552,9 @@ async def main() -> int:
         print(
             f"{'Created' if store_created else 'Reusing'} Memory Store {memory_store_id}"
         )
+
+        for change in await ensure_trait_groups(client, auth, memory_store_id):
+            print(f"  Updated: {change}")
 
         known_configuration_id = (
             os.environ.get("TWILIO_CONVERSATION_CONFIGURATION_ID") or ""

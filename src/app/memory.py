@@ -45,3 +45,20 @@ async def resolve_profile_id(memory_client: Any, address: str | None) -> str | N
     lookup = await memory_client.lookup_profile(id_type=id_type, value=value)
     profiles = getattr(lookup, "profiles", None) or []
     return profiles[0] if profiles else None
+
+
+async def patch_traits(
+    memory_client: Any, profile_id: str, traits: dict[str, dict[str, Any]]
+) -> None:
+    """Merge `traits` into a profile, trait by trait.
+
+    TAC 2.4.0 reads and creates profiles but has no update, so this sends the
+    Memory API's profile PATCH through the client TAC already authenticates.
+    Unmentioned traits are left alone; the write is queued (202), so a read
+    straight after may not reflect it yet. Only traits declared on the store
+    are accepted, which `scripts/provision.py` takes care of.
+    """
+    url = f"{memory_client.base_url}/v1/Stores/{memory_client.store_id}/Profiles/{profile_id}"
+    async with memory_client._get_client() as client:
+        response = await client.patch(url, json={"traits": traits})
+        response.raise_for_status()

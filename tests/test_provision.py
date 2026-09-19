@@ -6,6 +6,8 @@ re-creating a Memory Store or re-patching an unchanged configuration fails
 here rather than on someone's account.
 """
 
+import json
+
 import httpx
 import provision
 import pytest
@@ -18,6 +20,7 @@ from provision import (
     build_channel_settings,
     ensure_conversation_configuration,
     ensure_memory_store,
+    ensure_trait_groups,
     find_by_display_name,
     poll_operation,
     sync_configuration,
@@ -226,6 +229,43 @@ def test_server_supplied_fields_do_not_count_as_a_difference():
     assert _routing(ours) == _routing(theirs)
 
 
+async def test_server_listed_channels_with_no_rules_are_not_patched():
+    """The server lists RCS and VOICE with no capture rules on every
+    configuration. They route nothing, so they are not a difference."""
+    current = _configuration()
+    current["channelSettings"] |= {
+        "RCS": {"captureRules": [], "statusTimeouts": {"closed": 15, "inactive": None}},
+        "VOICE": {"captureRules": [], "statusTimeouts": None},
+    }
+
+    changes, recorder = await _sync(
+        current,
+        webhook_url="https://host/webhook",
+        channel_settings=build_channel_settings(None, "whatsapp:+1"),
+    )
+
+    assert changes == []
+    assert "PATCH" not in recorder.methods()
+
+
+async def test_a_removed_sender_still_patches_the_capture_rules():
+    """Ignoring empty channels must not hide one that still routes a sender
+    this run no longer configures."""
+    current = _configuration()
+    current["channelSettings"]["SMS"] = {
+        "captureRules": [{"from": "*", "to": "+1"}, {"from": "+1", "to": "*"}]
+    }
+
+    changes, recorder = await _sync(
+        current,
+        webhook_url="https://host/webhook",
+        channel_settings=build_channel_settings(None, "whatsapp:+1"),
+    )
+
+    assert "PATCH" in recorder.methods()
+    assert changes == ["channels ['SMS', 'WHATSAPP'] -> ['WHATSAPP']"]
+
+
 # --- operation polling ---
 
 
@@ -300,3 +340,78 @@ def test_items_reads_whichever_envelope_the_collection_uses():
     assert _items({"meta": {"key": "stores"}, "stores": ["a"]}) == ["a"]
     assert _items({"configurations": [{"id": "b"}]}) == [{"id": "b"}]
     assert _items({}) == []
+
+
+# --- trait groups ---
+
+TRAIT_GROUPS_URL = f"{MEMORY_API}/Stores/mem_store_1/TraitGroups"
+GROUPS = {
+    "Engagement": {"description": "d", "traits": {"a": {"dataType": "NUMBER"}}},
+    "Interests": {
+        "description": "d",
+        "traits": {"b": {"dataType": "STRING"}, "c": {"dataType": "ARRAY"}},
+    },
+}
+
+
+def _listing(groups: dict[str, dict]) -> dict:
+    return {
+        "meta": {"key": "traitGroups"},
+        "traitGroups": [{"displayName": name, "traits": traits} for name, traits in groups.items()],
+    }
+
+
+async def test_missing_trait_groups_are_created():
+    recorder = Recorder(
+        {
+            ("GET", f"{TRAIT_GROUPS_URL}?includeTraits=true"): _listing({}),
+            ("POST", TRAIT_GROUPS_URL): (202, {"message": "accepted"}),
+        }
+    )
+
+    async with recorder.client() as client:
+        changes = await ensure_trait_groups(client, AUTH, "mem_store_1", GROUPS)
+
+    assert recorder.methods() == ["GET", "POST", "POST"]
+    assert changes == ["trait group Engagement created", "trait group Interests created"]
+
+
+async def test_a_group_missing_some_traits_is_patched_with_only_those():
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json=_listing(
+                    {
+                        "Engagement": {"a": {"dataType": "NUMBER"}},
+                        "Interests": {"b": {"dataType": "STRING"}},
+                    }
+                ),
+            )
+        return httpx.Response(202, json={"message": "accepted"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        changes = await ensure_trait_groups(client, AUTH, "mem_store_1", GROUPS)
+
+    [patch] = [request for request in requests if request.method == "PATCH"]
+    assert str(patch.url) == f"{TRAIT_GROUPS_URL}/Interests"
+    assert json.loads(patch.read()) == {"traits": {"c": {"dataType": "ARRAY"}}}
+    assert changes == ["trait group Interests gained c"]
+
+
+async def test_declared_trait_groups_are_left_alone():
+    recorder = Recorder(
+        {
+            ("GET", f"{TRAIT_GROUPS_URL}?includeTraits=true"): _listing(
+                {name: group["traits"] for name, group in GROUPS.items()}
+            ),
+        }
+    )
+
+    async with recorder.client() as client:
+        assert await ensure_trait_groups(client, AUTH, "mem_store_1", GROUPS) == []
+
+    assert recorder.methods() == ["GET"]

@@ -49,6 +49,8 @@ services:
     build: .
     env_file: .env
     volumes:
+      # src for the trait group definitions in app.traits.
+      - ./src:/app/src
       - ./scripts:/app/scripts
     entrypoint: ["python", "scripts/provision.py"]
 

@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from fastapi import Response
 from openai import AsyncOpenAI
 from tac import TAC, TACConfig, get_logger
+from tac.adapters import AdapterOptions
 from tac.adapters.openai import with_tac_memory
 from tac.channels.messaging import MessagingChannel
 from tac.channels.sms import SMSChannel
@@ -28,10 +29,20 @@ from tac.utils.redaction import mask_address
 
 from app.agent import Agent
 from app.config import TAC_REQUIRED_ENV, AgentSettings, missing_env
-from app.memory import resolve_profile_id
+from app.memory import patch_traits, resolve_profile_id
 from app.prompt import RATE_LIMITED_REPLY, load_system_prompt
 from app.tools.escalation import EscalationContext, LoggingEscalation
 from app.tools.knowledge import FixtureKnowledgeSource, TwilioKnowledgeSource
+from app.traits import (
+    ENGAGEMENT,
+    INTERESTS,
+    PROMPT_TRAIT_GROUPS,
+    classify_interests,
+    count_escalations,
+    engagement_update,
+    interests_update,
+    now_iso,
+)
 
 load_dotenv()
 logger = get_logger(__name__)
@@ -40,11 +51,11 @@ logger = get_logger(__name__)
 # it is lost on restart and not shared between replicas; TAC's Conversation
 # Memory is what carries context across sessions.
 #
-# Nothing here is ever deleted on its own: TAC removes its own session when a
-# conversation closes, and this module never hears about it. So the number of
-# conversations is capped as well as the length of each, least recently used
-# first, which bounds the process rather than leaving a slow leak that only a
-# restart clears.
+# A conversation's history is dropped when TAC reports it closed. That report
+# only arrives for conversations TAC still holds in memory, so one that closes
+# across a restart is never reported, and the number of conversations is capped
+# as well as the length of each, least recently used first. That bounds the
+# process rather than leaving a slow leak that only a restart clears.
 HISTORIES: dict[str, list[dict[str, object]]] = {}
 MAX_HISTORY_MESSAGES = 40
 MAX_CONVERSATIONS = 500
@@ -241,9 +252,15 @@ def build_server() -> TACFastAPIServer:
 
         # `with_tac_memory` folds the caller's memory and profile into the
         # request, so the agent sees who it is talking to without this module
-        # assembling that context itself.
+        # assembling that context itself. Engagement counters are left out:
+        # they are for staff, and noise to the model.
         reply = await agent.respond(
-            client=with_tac_memory(openai_client, memory, context),
+            client=with_tac_memory(
+                openai_client,
+                memory,
+                context,
+                options=AdapterOptions(profile_traits=PROMPT_TRAIT_GROUPS),
+            ),
             history=history,
             escalation_context=EscalationContext(
                 conversation_id=context.conversation_id,
@@ -256,6 +273,13 @@ def build_server() -> TACFastAPIServer:
         return reply
 
     tac.on_message_ready(handle_message_ready)
+
+    async def handle_conversation_ended(context: ConversationSession) -> None:
+        """Drop the conversation's history and record it on the profile."""
+        history = HISTORIES.pop(context.conversation_id, [])
+        await _write_traits(tac, openai_client, settings, context, history)
+
+    tac.on_conversation_ended(handle_conversation_ended)
 
     # Each channel is registered only when its sender is configured. The
     # WhatsApp sandbox needs no Meta verification, so WhatsApp alone is a
@@ -326,6 +350,67 @@ async def _recall(
             exc_info=True,
         )
         return None
+
+
+async def _write_traits(
+    tac: TAC,
+    openai_client: AsyncOpenAI,
+    settings: AgentSettings,
+    context: ConversationSession,
+    history: list[dict[str, object]],
+) -> None:
+    """Write the `Engagement` and `Interests` traits for a closed conversation.
+
+    Best effort, like `_recall`: a trait not written costs a report, never a
+    reply. Only the names of the traits written are logged, not their values.
+    """
+    if settings.profile_traits == "off":
+        return
+    try:
+        memory_client = tac.conversation_memory_client
+        address = context.author_info.address if context.author_info else None
+        profile_id = context.profile_id or await resolve_profile_id(memory_client, address)
+        if not profile_id:
+            logger.info(f"Traits: no profile for {mask_address(address)}; nothing written")
+            return
+
+        profile = await memory_client.get_profile(profile_id, trait_groups=[ENGAGEMENT, INTERESTS])
+        stored = getattr(profile, "traits", None) or {}
+
+        traits: dict[str, dict[str, object]] = {
+            ENGAGEMENT: engagement_update(
+                stored.get(ENGAGEMENT) or {},
+                conversation_id=context.conversation_id,
+                channel=context.channel,
+                escalations=count_escalations(history),
+                now=now_iso(),
+            )
+        }
+        # An empty history is a conversation this process never saw a message
+        # of, usually because it restarted mid-conversation. There is nothing
+        # to classify, so only the counters are written.
+        if settings.profile_traits == "all" and history:
+            classified = await classify_interests(
+                openai_client,
+                model=settings.model,
+                reasoning_effort=settings.reasoning_effort,
+                transcript=_transcript(history),
+                timeout_seconds=settings.timeout_seconds,
+            )
+            interests = interests_update(stored.get(INTERESTS) or {}, classified or {})
+            if interests:
+                traits[INTERESTS] = interests
+
+        await patch_traits(memory_client, profile_id, traits)
+        logger.info(
+            f"Traits: profile={profile_id} conversation={context.conversation_id} "
+            f"wrote {', '.join(f'{group}.{name}' for group in traits for name in traits[group])}"
+        )
+    except Exception:
+        logger.warning(
+            f"Traits: writing failed for conversation {context.conversation_id}",
+            exc_info=True,
+        )
 
 
 def _transcript(history: list[dict[str, object]]) -> list[dict[str, str]]:
